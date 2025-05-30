@@ -36,5 +36,4 @@ if st.button("產生貼文內容"):
 
     # 圖片模擬
     st.image("https://source.unsplash.com/400x300/?coffee,city", caption="示意圖")
-streamlit run app.py
 
