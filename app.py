@@ -1,8 +1,39 @@
-return response.choices[0].message.content.strip()
+import streamlit as st
+from gtts import gTTS
+import os
+import requests
+import openai
 
-st.title("📸 InspoGen - IG 貼文產生器")
+# ✅ 從非隱藏版 secrets 讀取（方便開發者可見）
+try:
+    with open("streamlit_config/secrets.toml", "r", encoding="utf-8") as f:
+        for line in f:
+            if "OPENAI_API_KEY" in line:
+                openai.api_key = line.split("=")[1].strip().replace('"', '')
+except Exception as e:
+    st.error("❗ 無法讀取 API 金鑰，請確認 secrets 設定。")
+    st.stop()
 
-# 使用者輸入
+# 🧠 GPT 文案生成
+def generate_caption(topic, style):
+    prompt = f"請用 {style} 風格寫一篇關於「{topic}」的 IG 貼文，約80字，加入 emoji。"
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content.strip()
+
+# 🔖 GPT Hashtag 產生
+def generate_hashtags(topic):
+    prompt = f"針對「{topic}」這個主題產生 3 個熱門 IG hashtag，格式為：#xxx #yyy #zzz"
+    response = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content.strip()
+
+st.title("📸 InspoGen - 非隱藏版 secrets IG 貼文產生器")
+
 topic = st.text_input("輸入貼文主題（如：咖啡廳）")
 style = st.selectbox("選擇貼文文風", ["療癒", "搞笑", "文青", "極簡"])
 img_style = st.selectbox("選擇圖片風格", ["自然", "插畫", "極簡", "復古"])
@@ -17,10 +48,8 @@ if st.button("產生貼文內容") and topic:
     st.markdown("### 🔖 Hashtag 推薦")
     st.write(hashtags)
 
-    # 圖片處理（風格轉英文、備用圖）
     style_map = {"自然": "natural", "插畫": "illustration", "極簡": "minimalist", "復古": "vintage"}
     topic_map = {"咖啡廳": "coffee shop", "穿搭": "fashion", "旅行": "travel", "閱讀": "reading"}
-
     translated_topic = topic_map.get(topic, "lifestyle")
     translated_style = style_map.get(img_style, "aesthetic")
     search_term = f"{translated_topic},{translated_style}"
@@ -32,7 +61,6 @@ if st.button("產生貼文內容") and topic:
         fallback_img = "https://source.unsplash.com/400x300/?coffee"
         st.image(fallback_img, caption="預設示意圖 ☕")
 
-    # 語音生成
     desc = f"這張圖片呈現了「{topic}」的情境，帶有{style}風格與 {img_style} 視覺效果。"
     voice_text = desc + " 接著是貼文內容：" + caption
     tts = gTTS(voice_text, lang="zh", slow=True if tts_speed == "稍慢" else False)
