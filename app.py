@@ -12,7 +12,7 @@ style = st.selectbox("選擇文風", ["療癒", "搞笑", "文青", "極簡"])
 
 if st.button("產生貼文內容"):
     # 建立 OpenAI Client
-    client = openai.OpenAI(api_key=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)
+    client = openai.OpenAI
 
 
     # 呼叫新版 Chat Completions API
