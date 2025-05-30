@@ -1,4 +1,4 @@
-   return response.choices[0].message.content.strip()
+return response.choices[0].message.content.strip()
 
 st.title("📸 InspoGen - IG 貼文產生器")
 
