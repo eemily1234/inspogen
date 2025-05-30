@@ -6,7 +6,7 @@ import openai
 
 # ✅ 從非隱藏版 secrets 讀取（方便開發者可見）
 try:
-    with open("streamlit_config/secrets.toml", "r", encoding="utf-8") as f:
+    with open("secrets.toml", "r", encoding="utf-8") as f:
         for line in f:
             if "OPENAI_API_KEY" in line:
                 openai.api_key = line.split("=")[1].strip().replace('"', '')
