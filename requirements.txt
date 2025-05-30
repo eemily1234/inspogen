@@ -1,4 +1,5 @@
 streamlit
 gtts
 requests
+openai
 
