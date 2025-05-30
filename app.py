@@ -2,22 +2,15 @@ import streamlit as st
 from gtts import gTTS
 import os
 import requests
-import openai
+from openai import OpenAI
 
-# ✅ 從非隱藏版 secrets 讀取（方便開發者可見）
-try:
-    with open("secrets.toml", "r", encoding="utf-8") as f:
-        for line in f:
-            if "OPENAI_API_KEY" in line:
-                openai.api_key = line.split("=")[1].strip().replace('"', '')
-except Exception as e:
-    st.error("❗ 無法讀取 API 金鑰，請確認 secrets 設定。")
-    st.stop()
+# ✅ 使用新版 OpenAI SDK 的安全方式
+client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
 # 🧠 GPT 文案生成
 def generate_caption(topic, style):
     prompt = f"請用 {style} 風格寫一篇關於「{topic}」的 IG 貼文，約80字，加入 emoji。"
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}]
     )
@@ -26,13 +19,13 @@ def generate_caption(topic, style):
 # 🔖 GPT Hashtag 產生
 def generate_hashtags(topic):
     prompt = f"針對「{topic}」這個主題產生 3 個熱門 IG hashtag，格式為：#xxx #yyy #zzz"
-    response = openai.ChatCompletion.create(
+    response = client.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}]
     )
     return response.choices[0].message.content.strip()
 
-st.title("📸 InspoGen - 非隱藏版 secrets IG 貼文產生器")
+st.title("📸 InspoGen - openai v1 版本 IG 貼文產生器")
 
 topic = st.text_input("輸入貼文主題（如：咖啡廳）")
 style = st.selectbox("選擇貼文文風", ["療癒", "搞笑", "文青", "極簡"])
@@ -69,9 +62,3 @@ if st.button("產生貼文內容") and topic:
 
     with open("voice.mp3", "rb") as audio_file:
         st.download_button("⬇️ 下載語音", audio_file, file_name="voice.mp3")
-
-
-
-
-
-
