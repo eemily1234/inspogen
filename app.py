@@ -1,6 +1,6 @@
    return response.choices[0].message.content.strip()
 
-st.title("📸 InspoGen - 金鑰安全版 IG 貼文產生器")
+st.title("📸 InspoGen - IG 貼文產生器")
 
 # 使用者輸入
 topic = st.text_input("輸入貼文主題（如：咖啡廳）")
