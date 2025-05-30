@@ -4,10 +4,14 @@ import os
 import requests
 from openai import OpenAI
 
-# ✅ 使用新版 OpenAI SDK 的安全方式
-client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
+# 直接讓使用者輸入 API 金鑰
+api_key = st.text_input("請輸入你的 OpenAI API 金鑰", type="password")
+if not api_key:
+    st.warning("⚠️ 請輸入金鑰以啟動服務")
+    st.stop()
 
-# 🧠 GPT 文案生成
+client = OpenAI(api_key=api_key)
+
 def generate_caption(topic, style):
     prompt = f"請用 {style} 風格寫一篇關於「{topic}」的 IG 貼文，約80字，加入 emoji。"
     response = client.chat.completions.create(
@@ -16,7 +20,6 @@ def generate_caption(topic, style):
     )
     return response.choices[0].message.content.strip()
 
-# 🔖 GPT Hashtag 產生
 def generate_hashtags(topic):
     prompt = f"針對「{topic}」這個主題產生 3 個熱門 IG hashtag，格式為：#xxx #yyy #zzz"
     response = client.chat.completions.create(
@@ -25,7 +28,7 @@ def generate_hashtags(topic):
     )
     return response.choices[0].message.content.strip()
 
-st.title("📸 InspoGen - openai v1 版本 IG 貼文產生器")
+st.title("📸 InspoGen - 免 secrets 金鑰版")
 
 topic = st.text_input("輸入貼文主題（如：咖啡廳）")
 style = st.selectbox("選擇貼文文風", ["療癒", "搞笑", "文青", "極簡"])
