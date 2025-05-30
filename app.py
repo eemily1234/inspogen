@@ -1,56 +1,73 @@
 import streamlit as st
 from gtts import gTTS
 import requests
+from PIL import Image
+from io import BytesIO
+import base64
 
-HF_API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
-HEADERS = {"Content-Type": "application/json"}
+st.set_page_config(page_title="InspoGen 一頁式 AI 貼文產生器", page_icon="🌟")
+st.title("🌟 InspoGen - 一頁式 AI 多模態貼文產生器")
 
-def generate_caption(topic, style):
-    prompt = f"請用{style}的語氣，為「{topic}」寫一段大約60字的IG貼文，加入 emoji。"
-    payload = {"inputs": prompt}
-    try:
-        with st.spinner("⏳ 生成中，請稍候..."):
-            response = requests.post(HF_API_URL, headers=HEADERS, json=payload, timeout=20)
-            result = response.json()
-            if isinstance(result, list) and "generated_text" in result[0]:
-                return result[0]["generated_text"].strip()
-    except Exception as e:
-        return None
-    return None
-
-st.set_page_config(page_title="InspoGen - flan 模型", page_icon="📸")
-st.title("📸 InspoGen - flan-t5 穩定版")
-
+# --- 主題選擇區塊 ---
+st.header("📝 Step 1：輸入主題與風格")
 topic = st.selectbox("選擇主題", ["咖啡廳", "旅行", "閱讀", "穿搭", "日常生活"])
 style = st.selectbox("選擇文風", ["療癒", "搞笑", "文青", "極簡"])
-img_style = st.selectbox("圖片風格", ["自然", "插畫", "極簡", "復古"])
 tts_speed = st.selectbox("語音語速", ["正常", "稍慢", "快速"])
 
-if st.button("產生貼文內容"):
-    caption = generate_caption(topic, style)
-    st.markdown("### 📄 IG 貼文內容")
-    if caption:
-        st.write(caption)
-    else:
-        st.error("⚠️ 無法產生貼文，伺服器忙碌或超時，請稍後重試。")
-        caption = f"這是一段模擬的 {style} 風格 IG 貼文：主題是「{topic}」 🌟📷☕"
-
-    style_map = {"自然": "natural", "插畫": "illustration", "極簡": "minimalist", "復古": "vintage"}
-    topic_map = {
-        "咖啡廳": "coffee shop", "穿搭": "fashion", "旅行": "travel",
-        "閱讀": "reading", "日常生活": "daily lifestyle"
-    }
-    search_term = f"{topic_map.get(topic, 'lifestyle')},{style_map.get(img_style, 'aesthetic')}"
-    img_url = f"https://source.unsplash.com/400x300/?{search_term}"
-
+# --- 產文區塊 ---
+st.subheader("✏️ IG 貼文內容")
+caption = ""
+if st.button("🔮 產生 IG 貼文內容"):
+    prompt = f"請用{style}的語氣，為「{topic}」寫一段大約60字的IG貼文，加入 emoji。"
     try:
-        st.image(img_url, caption=f"情境示意圖：{img_style}風")
+        with st.spinner("AI 生成中，請稍候..."):
+            res = requests.post(
+                "https://api-inference.huggingface.co/models/google/flan-t5-base",
+                headers={"Content-Type": "application/json"},
+                json={"inputs": prompt},
+                timeout=20
+            )
+            result = res.json()
+            if isinstance(result, list) and "generated_text" in result[0]:
+                caption = result[0]["generated_text"].strip()
+            else:
+                caption = f"這是一段模擬的 {style} 風格 IG 貼文，主題是「{topic}」 ✨📷"
     except:
-        st.image("https://source.unsplash.com/400x300/?coffee", caption="☕ 預設示意圖")
+        caption = f"這是一段模擬的 {style} 風格 IG 貼文，主題是「{topic}」 ✨📷"
+    st.success("✅ 產生完成")
+    st.write(caption)
 
-    voice = f"這段貼文以 {style} 文風描寫 {topic}，畫面呈現 {img_style} 效果。內容如下：" + caption
-    tts = gTTS(voice, lang="zh", slow=True if tts_speed == "稍慢" else False)
+    # 語音
+    tts = gTTS(
+        f"這段貼文主題是「{topic}」，文風是 {style}，內容是：" + caption,
+        lang="zh",
+        slow=True if tts_speed == "稍慢" else False
+    )
     tts.save("voice.mp3")
     st.audio("voice.mp3")
     with open("voice.mp3", "rb") as f:
         st.download_button("⬇️ 下載語音", f, file_name="voice.mp3")
+
+# --- 產圖區塊 ---
+st.header("🖼️ Step 2：輸入描述產生配圖")
+desc = st.text_input("請描述你想要的圖片風格（例如：可愛插畫風的下午茶場景）")
+
+if st.button("🎨 生成配圖") and desc:
+    st.info("圖片生成中，請稍候約 10～15 秒...")
+    try:
+        response = requests.post(
+            "https://hf.space/embed/lambdal/text-to-image/api/predict",
+            json={"data": [desc]},
+            timeout=30
+        )
+        output = response.json()
+        if output and "data" in output and len(output["data"]) > 0:
+            base64_img = output["data"][0].split(",")[1]
+            img_data = base64.b64decode(base64_img)
+            image = Image.open(BytesIO(img_data))
+            st.image(image, caption="✨ AI 生成圖片")
+            st.success("✅ 生成完成，可右鍵另存圖片")
+        else:
+            st.error("⚠️ 圖片產生失敗，請更換描述內容再試")
+    except:
+        st.error("❌ 發生錯誤，請稍後重試")
