@@ -1,34 +1,26 @@
 import streamlit as st
 from gtts import gTTS
-import os
 import requests
-from openai import OpenAI
 
-# 直接讓使用者輸入 API 金鑰
-api_key = st.text_input("請輸入你的 OpenAI API 金鑰", type="password")
-if not api_key:
-    st.warning("⚠️ 請輸入金鑰以啟動服務")
-    st.stop()
-
-client = OpenAI(api_key=api_key)
+# 使用 Hugging Face Inference API（免費版，不需金鑰）
+HF_API_URL = "https://api-inference.huggingface.co/models/microsoft/DialoGPT-medium"
 
 def generate_caption(topic, style):
-    prompt = f"請用 {style} 風格寫一篇關於「{topic}」的 IG 貼文，約80字，加入 emoji。"
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.choices[0].message.content.strip()
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "inputs": f"用{style}語氣寫一段關於「{topic}」的 IG 貼文，加入表情符號，大約 50 字。",
+    }
+    try:
+        response = requests.post(HF_API_URL, headers=headers, json=payload)
+        result = response.json()
+        if isinstance(result, list) and len(result) > 0:
+            return result[0]["generated_text"]
+        else:
+            return "⚠️ 目前無法產生貼文，請稍後再試或更換主題。"
+    except:
+        return "❌ 發生錯誤，請檢查網路或稍後重試。"
 
-def generate_hashtags(topic):
-    prompt = f"針對「{topic}」這個主題產生 3 個熱門 IG hashtag，格式為：#xxx #yyy #zzz"
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.choices[0].message.content.strip()
-
-st.title("📸 InspoGen - 免 secrets 金鑰版")
+st.title("📸 InspoGen - HuggingFace 免費備用版")
 
 topic = st.text_input("輸入貼文主題（如：咖啡廳）")
 style = st.selectbox("選擇貼文文風", ["療癒", "搞笑", "文青", "極簡"])
@@ -37,12 +29,8 @@ tts_speed = st.selectbox("語音語速選擇", ["正常", "稍慢", "快速"])
 
 if st.button("產生貼文內容") and topic:
     caption = generate_caption(topic, style)
-    hashtags = generate_hashtags(topic)
-
     st.markdown("### 📄 IG 貼文內容")
     st.write(caption)
-    st.markdown("### 🔖 Hashtag 推薦")
-    st.write(hashtags)
 
     style_map = {"自然": "natural", "插畫": "illustration", "極簡": "minimalist", "復古": "vintage"}
     topic_map = {"咖啡廳": "coffee shop", "穿搭": "fashion", "旅行": "travel", "閱讀": "reading"}
@@ -57,8 +45,7 @@ if st.button("產生貼文內容") and topic:
         fallback_img = "https://source.unsplash.com/400x300/?coffee"
         st.image(fallback_img, caption="預設示意圖 ☕")
 
-    desc = f"這張圖片呈現了「{topic}」的情境，帶有{style}風格與 {img_style} 視覺效果。"
-    voice_text = desc + " 接著是貼文內容：" + caption
+    voice_text = f"這張圖呈現「{topic}」的風格，為 {style} 文風與 {img_style} 視覺。貼文如下：" + caption
     tts = gTTS(voice_text, lang="zh", slow=True if tts_speed == "稍慢" else False)
     tts.save("voice.mp3")
     st.audio("voice.mp3")
