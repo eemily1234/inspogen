@@ -1,6 +1,9 @@
-from flask import Flask, jsonify
+import streamlit as st
+from gtts import gTTS
+import openai
 
-app = Flask(__name__)
+
+app = streamlit(__name__)
 
 @app.route('/')
 def home():
