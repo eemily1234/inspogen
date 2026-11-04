@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS meal_order (
     note TEXT,                   -- 整單備註（過敏、趕時間…）
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','paid','cancelled')),
     sale_id INTEGER REFERENCES sale(id),
+    merged_into INTEGER,         -- 併桌：此單已併入的訂單（status 會是 cancelled）
     created_by INTEGER REFERENCES user(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -98,11 +99,22 @@ CREATE TABLE IF NOT EXISTS order_line (
     qty INTEGER NOT NULL CHECK (qty > 0),
     unit_price INTEGER NOT NULL,           -- 下單當下的價格
     note TEXT,                              -- 特殊需求（少辣、不要香菜…）
+    paid_qty INTEGER NOT NULL DEFAULT 0,   -- 已結帳份數（分開結帳）
+    origin TEXT,                            -- 併桌來源，例：併自 B1
     status TEXT NOT NULL DEFAULT 'new'
         CHECK (status IN ('new','preparing','ready','served','cancelled')),
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS ix_oline_order ON order_line(order_id);
+-- 每次結帳付了哪些品項（作廢時據此還原）
+CREATE TABLE IF NOT EXISTS order_payment_line (
+    id INTEGER PRIMARY KEY,
+    sale_id INTEGER NOT NULL REFERENCES sale(id),
+    order_id INTEGER NOT NULL,
+    order_line_id INTEGER NOT NULL REFERENCES order_line(id),
+    qty INTEGER NOT NULL CHECK (qty > 0)
+);
+CREATE INDEX IF NOT EXISTS ix_opl_sale ON order_payment_line(sale_id);
 
 -- Line 記帳：綁定 Line 帳號到系統使用者（僅老闆）
 CREATE TABLE IF NOT EXISTS line_user (
@@ -131,9 +143,26 @@ CREATE TABLE IF NOT EXISTS line_event (
 """
 
 
+# 舊資料庫升級：CREATE TABLE IF NOT EXISTS 不會替既有資料表補欄位，這裡逐一補上
+MIGRATIONS = [
+    ("meal_order", "merged_into", "INTEGER"),
+    ("order_line", "paid_qty", "INTEGER NOT NULL DEFAULT 0"),
+    ("order_line", "origin", "TEXT"),
+]
+
+
+def migrate(conn):
+    for table, col, decl in MIGRATIONS:
+        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if col not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    conn.commit()
+
+
 def connect(path=None):
     conn = sqlite3.connect(path or DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    migrate(conn)
     return conn

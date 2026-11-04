@@ -302,7 +302,21 @@ def void_sale(conn, sale_id, user_id=None, today=None):
             raise OpsError("找不到銷貨單")
         if sale["status"] == "void":
             raise OpsError("此單已作廢")
+        # 餐點訂單的付款：作廢前先確認能還原（該桌不能已有新的未結帳訂單）
+        linked = conn.execute(
+            "SELECT DISTINCT o.id, o.status, o.order_type, o.table_no FROM order_payment_line p "
+            "JOIN meal_order o ON o.id=p.order_id WHERE p.sale_id=?", (sale_id,)).fetchall()
+        for o in linked:
+            if o["status"] == "paid" and o["order_type"] == "dine_in" and conn.execute(
+                    "SELECT 1 FROM meal_order WHERE status='open' AND order_type='dine_in' "
+                    "AND table_no=? AND id!=?", (o["table_no"], o["id"])).fetchone():
+                raise OpsError(f"桌 {o['table_no']} 已有新的未結帳訂單，請先結帳後再作廢這一筆")
         conn.execute("UPDATE sale SET status='void' WHERE id=?", (sale_id,))
+        for p in conn.execute("SELECT * FROM order_payment_line WHERE sale_id=?", (sale_id,)).fetchall():
+            conn.execute("UPDATE order_line SET paid_qty=MAX(0, paid_qty-?) WHERE id=?",
+                         (p["qty"], p["order_line_id"]))
+            conn.execute("UPDATE meal_order SET status='open' WHERE id=? AND status='paid'",
+                         (p["order_id"],))
         moves = conn.execute(
             "SELECT * FROM stock_move WHERE ref_type='sale' AND ref_id=? AND move_type='sale'",
             (sale_id,),
