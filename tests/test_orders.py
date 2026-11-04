@@ -285,3 +285,105 @@ def test_old_database_is_migrated(tmp_path):
     assert "merged_into" in {r["name"] for r in c.execute("PRAGMA table_info(meal_order)")}
     assert c.execute("SELECT COUNT(*) FROM meal_order").fetchone()[0] == 1       # 舊資料保留
     db.connect(path)                                                              # 重複執行不會出錯
+
+
+# ───────────── 桌位／外場總覽／廚房接單 ─────────────
+@pytest.fixture
+def floors(conn):
+    o.setup_tables(conn, {1: 3, 2: 2})
+    return conn
+
+
+def test_setup_tables_two_floors_four_seats(floors):
+    ts = o.list_tables(floors)
+    assert [t["name"] for t in ts] == ["101", "102", "103", "201", "202"]
+    assert {t["seats"] for t in ts} == {4} and {t["floor"] for t in ts} == {1, 2}
+    o.setup_tables(floors, {1: 4, 2: 2})                      # 加一桌
+    assert len(o.list_tables(floors)) == 6
+    o.setup_tables(floors, {1: 2, 2: 2})                      # 減少空桌
+    assert [t["name"] for t in o.list_tables(floors)] == ["101", "102", "201", "202"]
+
+
+def test_cannot_remove_table_in_use_and_validation(floors):
+    o.place_order(floors, "dine_in", [L(1)], table_no="102")
+    with pytest.raises(s.OpsError):
+        o.setup_tables(floors, {1: 1, 2: 2})
+    assert len(o.list_tables(floors)) == 5                     # 失敗整筆回復
+    with pytest.raises(s.OpsError):
+        o.setup_tables(floors, {10: 1})
+
+
+def test_dine_in_must_use_configured_table_once_tables_exist(floors):
+    with pytest.raises(s.OpsError):
+        o.place_order(floors, "dine_in", [L(1)], table_no="999")
+    r = o.place_order(floors, "dine_in", [L(1)], table_no="101", guests=4)
+    assert o.open_orders(floors)[0]["guests"] == 4 and r["table_no"] == "101"
+    with pytest.raises(s.OpsError):
+        o.place_order(floors, "dine_in", [L(1)], table_no="102", guests=0)
+
+
+def test_floor_overview_stages_and_flow_counts(floors):
+    a = o.place_order(floors, "dine_in", [L(1), L(2)], table_no="101", guests=4)
+    b = o.place_order(floors, "dine_in", [L(1)], table_no="201", guests=2)
+    c = o.place_order(floors, "dine_in", [L(2)], table_no="202", guests=3)
+    o.place_order(floors, "takeout", [L(1)])
+    o.advance_ticket(floors, b["order_id"], 1)                                   # 201 製作中
+    o.advance_ticket(floors, c["order_id"], 1); o.advance_ticket(floors, c["order_id"], 1)   # 202 待上菜
+    ov = o.floor_overview(floors)
+    stage = {t["name"]: t["stage"] for t in ov["tables"]}
+    assert stage == {"101": "new", "102": "empty", "103": "empty", "201": "preparing", "202": "ready"}
+    assert ov["flow"] == {"new": 1, "preparing": 1, "ready": 1, "dining": 0, "empty": 2}
+    assert ov["floors"] == [1, 2] and len(ov["takeouts"]) == 1
+    t202 = next(t for t in ov["tables"] if t["name"] == "202")
+    assert t202["to_serve"] == 1 and t202["guests"] == 3
+    assert ov["kitchen"]["accepting"] is True
+
+
+def test_ready_has_priority_and_serving_moves_table_to_dining(floors):
+    r = o.place_order(floors, "dine_in", [L(1), L(2)], table_no="101")
+    o.advance_ticket(floors, r["order_id"], 1); o.advance_ticket(floors, r["order_id"], 1)   # 全部 ready
+    o.place_order(floors, "dine_in", [L(1)], table_no="101")                                # 加點（新單）
+    t = next(t for t in o.floor_overview(floors)["tables"] if t["name"] == "101")
+    assert t["stage"] == "ready" and t["counts"]["new"] == 1 and t["to_serve"] == 2
+    assert o.serve_all_ready(floors, r["order_id"]) == 2
+    t = next(t for t in o.floor_overview(floors)["tables"] if t["name"] == "101")
+    assert t["stage"] == "new"
+    o.advance_ticket(floors, r["order_id"], 2); o.advance_ticket(floors, r["order_id"], 2)
+    o.serve_all_ready(floors, r["order_id"])
+    t = next(t for t in o.floor_overview(floors)["tables"] if t["name"] == "101")
+    assert t["stage"] == "dining"
+    with pytest.raises(s.OpsError):
+        o.serve_all_ready(floors, r["order_id"])
+
+
+def test_kitchen_pause_blocks_new_orders_but_not_existing_ones(floors):
+    r = o.place_order(floors, "dine_in", [L(1)], table_no="101")
+    o.set_kitchen_accepting(floors, False, "客滿，暫停 20 分鐘")
+    assert o.kitchen_status(floors) == {"accepting": False, "reason": "客滿，暫停 20 分鐘"}
+    with pytest.raises(s.OpsError, match="暫停接單：客滿"):
+        o.place_order(floors, "dine_in", [L(1)], table_no="102")
+    with pytest.raises(s.OpsError):
+        o.place_order(floors, "takeout", [L(1)])
+    with pytest.raises(s.OpsError):
+        o.place_order(floors, "dine_in", [L(2)], table_no="101")                 # 加點也不行
+    assert o.advance_ticket(floors, r["order_id"], 1) == "preparing"             # 已送出的單照常處理
+    o.checkout_order(floors, r["order_id"], "現金")
+    o.set_kitchen_accepting(floors, True)
+    assert o.kitchen_status(floors) == {"accepting": True, "reason": ""}
+    o.place_order(floors, "dine_in", [L(1)], table_no="102")
+
+
+def test_merge_adds_guests(floors):
+    o.place_order(floors, "dine_in", [L(1)], table_no="101", guests=4)
+    o.place_order(floors, "dine_in", [L(1)], table_no="102", guests=3)
+    o.merge_tables(floors, "102", "101")
+    assert o.open_orders(floors)[0]["guests"] == 7
+    t = {t["name"]: t for t in o.floor_overview(floors)["tables"]}
+    assert t["101"]["guests"] == 7 and t["102"]["stage"] == "empty"
+
+
+def test_legacy_order_on_unconfigured_table_still_visible(conn):
+    o.place_order(conn, "dine_in", [L(1)], table_no="A3")                        # 尚未設定桌位前的舊單
+    o.setup_tables(conn, {1: 2})
+    ov = o.floor_overview(conn)
+    assert [t["name"] for t in ov["tables"] if t["floor"] == 0] == ["A3"]

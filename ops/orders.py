@@ -6,6 +6,8 @@
 - 餐點不扣庫存；結帳時寫入 sale / sale_line / 收入分錄（與 POS 同一份帳）。
 - 分開結帳：可只結部分品項（甚至同一品項只結其中幾份）；全部結清後訂單才結束。
 - 併桌／換桌：把一桌的訂單併入另一桌（目標桌沒有訂單時就是換桌）。
+- 桌位分樓層（dining_table），每桌預設 4 人；外場總覽把每桌歸到流程階段。
+- 廚房可切換「接單中／暫停接單」；暫停時不能送出新單。
 """
 from datetime import date, datetime
 
@@ -35,13 +37,17 @@ def open_order_for_table(conn, table_no):
     return dict(row) if row else None
 
 
-def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None, today=None):
+def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None, today=None,
+                guests=None):
     """下單。lines = [{"item_id":..,"qty":..,"note":..}, ...]
 
     回傳 {order_id, round_no, table_no, pickup_no, is_addon}。
     """
     if order_type not in ("dine_in", "takeout"):
         raise OpsError("請選擇內用或外帶")
+    ks = kitchen_status(conn)
+    if not ks["accepting"]:
+        raise OpsError("廚房目前暫停接單" + (f"：{ks['reason']}" if ks["reason"] else ""))
     table_no = (table_no or "").strip() or None
     if order_type == "dine_in" and not table_no:
         raise OpsError("內用請輸入桌號")
@@ -49,6 +55,13 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
         raise OpsError("尚未選擇餐點")
     note = (note or "").strip() or None
     today = (today or date.today()).isoformat()
+    if order_type == "dine_in" and conn.execute("SELECT 1 FROM dining_table LIMIT 1").fetchone():
+        if not conn.execute("SELECT 1 FROM dining_table WHERE name=?", (table_no,)).fetchone():
+            raise OpsError(f"找不到桌號「{table_no}」")
+    if guests is not None:
+        guests = int(guests)
+        if not 1 <= guests <= 30:
+            raise OpsError("人數需在 1～30 之間")
 
     clean = []
     for ln in lines:
@@ -75,8 +88,8 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
                     "SELECT COALESCE(MAX(pickup_no),0)+1 FROM meal_order "
                     "WHERE order_type='takeout' AND date(created_at)=?", (today,)).fetchone()[0]
             cur = conn.execute(
-                "INSERT INTO meal_order(order_type,table_no,pickup_no,note,created_by) VALUES (?,?,?,?,?)",
-                (order_type, table_no, pickup_no, note, user_id))
+                "INSERT INTO meal_order(order_type,table_no,pickup_no,note,created_by,guests) VALUES (?,?,?,?,?,?)",
+                (order_type, table_no, pickup_no, note, user_id, guests))
             order_id, round_no = cur.lastrowid, 1
         else:
             order_id = order["id"]
@@ -87,6 +100,8 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
             if note:
                 merged = f"{order['note']}；{note}" if order["note"] else note
                 conn.execute("UPDATE meal_order SET note=? WHERE id=?", (merged, order_id))
+            if guests and not order["guests"]:
+                conn.execute("UPDATE meal_order SET guests=? WHERE id=?", (guests, order_id))
         for it, qty, lnote in clean:
             conn.execute(
                 "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note) VALUES (?,?,?,?,?,?)",
@@ -316,6 +331,9 @@ def merge_tables(conn, from_table, to_table):
         conn.execute("UPDATE order_payment_line SET order_id=? WHERE order_id=?", (dst["id"], src["id"]))
         notes = [n for n in (dst["note"], src["note"]) if n]
         conn.execute("UPDATE meal_order SET note=? WHERE id=?", ("；".join(notes) or None, dst["id"]))
+        if dst["guests"] or src["guests"]:
+            conn.execute("UPDATE meal_order SET guests=? WHERE id=?",
+                         ((dst["guests"] or 0) + (src["guests"] or 0), dst["id"]))
         conn.execute("UPDATE meal_order SET status='cancelled', merged_into=? WHERE id=?",
                      (dst["id"], src["id"]))
         return {"action": "merge", "order_id": dst["id"]}
@@ -324,3 +342,113 @@ def merge_tables(conn, from_table, to_table):
 def wait_minutes(created_at, now=None):
     now = now or datetime.now()
     return max(0, int((now - datetime.fromisoformat(created_at)).total_seconds() // 60))
+
+
+# ───────────────────────── 廚房是否接單 ─────────────────────────
+def _setting(conn, key, default=None):
+    row = conn.execute("SELECT value FROM setting WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def _set_setting(conn, key, value):
+    conn.execute("INSERT INTO setting(key,value) VALUES (?,?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+
+def kitchen_status(conn):
+    """回傳 {"accepting": bool, "reason": str}。預設接單。"""
+    return {"accepting": _setting(conn, "kitchen_accepting", "1") == "1",
+            "reason": _setting(conn, "kitchen_reason", "") or ""}
+
+
+def set_kitchen_accepting(conn, accepting, reason=None):
+    """廚房切換接單／暫停接單。暫停期間前台不能送新單（已送出的單不受影響）。"""
+    with conn:
+        _set_setting(conn, "kitchen_accepting", "1" if accepting else "0")
+        _set_setting(conn, "kitchen_reason", "" if accepting else (reason or "").strip())
+
+
+# ───────────────────────── 桌位與外場總覽 ─────────────────────────
+STAGES = [("new", "待接單"), ("preparing", "製作中"), ("ready", "待上菜"), ("dining", "用餐中")]
+STAGE_LABEL = dict(STAGES, empty="空桌")
+
+
+def setup_tables(conn, floors, seats=4):
+    """設定桌位。floors = {1: 6, 2: 6} 表示 1 樓 6 桌、2 樓 6 桌；桌名 101～106、201～206。
+    只會新增缺少的桌，或刪除超出的空桌；有客人使用的桌不會被刪。"""
+    if seats < 1:
+        raise OpsError("每桌座位數需至少 1")
+    for fl, n in floors.items():
+        if not 1 <= int(fl) <= 9 or not 0 <= int(n) <= 99:
+            raise OpsError("樓層需為 1～9，每層桌數 0～99")
+    want = {f"{int(fl)}{i:02d}": (int(fl), i) for fl, n in floors.items() for i in range(1, int(n) + 1)}
+    with conn:
+        have = {r["name"] for r in conn.execute("SELECT name FROM dining_table")}
+        for name, (fl, _) in want.items():
+            if name not in have:
+                conn.execute("INSERT INTO dining_table(floor,name,seats) VALUES (?,?,?)", (fl, name, seats))
+        in_use = {r["table_no"] for r in conn.execute(
+            "SELECT table_no FROM meal_order WHERE status='open' AND order_type='dine_in'")}
+        for name in have - set(want):
+            if name in in_use:
+                raise OpsError(f"桌 {name} 還有客人，無法刪除")
+            conn.execute("DELETE FROM dining_table WHERE name=?", (name,))
+        conn.execute("UPDATE dining_table SET seats=?", (seats,))
+    return len(want)
+
+
+def list_tables(conn):
+    return [dict(r) for r in conn.execute("SELECT * FROM dining_table ORDER BY floor, name")]
+
+
+def _stage_of(od):
+    """一桌的流程階段：有可上菜 > 有待接單 > 有製作中 > 全部已上菜（用餐中）。"""
+    sts = {l["status"] for l in od["lines"] if l["status"] != "cancelled"}
+    for st in ("ready", "new", "preparing"):
+        if st in sts:
+            return st
+    return "dining"
+
+
+def _tile(od, now=None):
+    active = [l for l in od["lines"] if l["status"] != "cancelled"]
+    return {
+        "order_id": od["id"], "stage": _stage_of(od), "guests": od.get("guests"),
+        "wait": wait_minutes(od["created_at"], now), "total": od["total"],
+        "unpaid_total": od["unpaid_total"], "to_serve": od["to_serve"],
+        "counts": {k: sum(1 for l in active if l["status"] == k) for k, _ in STAGES[:3]},
+        "note": od["note"],
+    }
+
+
+def floor_overview(conn, now=None):
+    """外場即時總覽：各桌狀態、外帶單、流程各階段桌數、廚房是否接單。"""
+    ods = open_orders(conn)
+    dine = {o["table_no"]: o for o in ods if o["order_type"] == "dine_in"}
+    tables = []
+    for t in list_tables(conn):
+        od = dine.pop(t["name"], None)
+        tables.append({**t, "stage": "empty", "order_id": None, "guests": None,
+                       "to_serve": 0, "wait": 0, "total": 0, "unpaid_total": 0,
+                       "counts": {}, "note": None, **(_tile(od, now) if od else {})})
+    # 沒設定在桌位表的內用單（舊資料或未設定桌位）也要看得到
+    for name, od in dine.items():
+        tables.append({"id": None, "floor": 0, "name": name, "seats": 4, **_tile(od, now)})
+    takeouts = [{"where": o["where"], **_tile(o, now)} for o in ods if o["order_type"] == "takeout"]
+    flow = {k: 0 for k, _ in STAGES}
+    flow["empty"] = sum(1 for t in tables if t["stage"] == "empty")
+    for t in tables:
+        if t["stage"] in flow and t["stage"] != "empty":
+            flow[t["stage"]] += 1
+    return {"tables": tables, "takeouts": takeouts, "flow": flow, "kitchen": kitchen_status(conn),
+            "floors": sorted({t["floor"] for t in tables})}
+
+
+def serve_all_ready(conn, order_id):
+    """服務生一鍵上菜：這張訂單所有「待上菜」品項標為已上菜。回傳份數。"""
+    with conn:
+        cur = conn.execute("UPDATE order_line SET status='served' WHERE order_id=? AND status='ready'",
+                           (order_id,))
+        if cur.rowcount == 0:
+            raise OpsError("目前沒有可上的菜")
+        return cur.rowcount

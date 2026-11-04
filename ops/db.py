@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS meal_order (
     status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','paid','cancelled')),
     sale_id INTEGER REFERENCES sale(id),
     merged_into INTEGER,         -- 併桌：此單已併入的訂單（status 會是 cancelled）
+    guests INTEGER,              -- 用餐人數
     created_by INTEGER REFERENCES user(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -106,6 +107,18 @@ CREATE TABLE IF NOT EXISTS order_line (
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS ix_oline_order ON order_line(order_id);
+-- 桌位：分樓層，每桌座位數（預設 4 人）
+CREATE TABLE IF NOT EXISTS dining_table (
+    id INTEGER PRIMARY KEY,
+    floor INTEGER NOT NULL,
+    name TEXT NOT NULL UNIQUE,   -- 例：101（1 樓第 1 桌）
+    seats INTEGER NOT NULL DEFAULT 4
+);
+-- 系統設定（例如廚房是否接單）
+CREATE TABLE IF NOT EXISTS setting (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 -- 每次結帳付了哪些品項（作廢時據此還原）
 CREATE TABLE IF NOT EXISTS order_payment_line (
     id INTEGER PRIMARY KEY,
@@ -146,6 +159,7 @@ CREATE TABLE IF NOT EXISTS line_event (
 # 舊資料庫升級：CREATE TABLE IF NOT EXISTS 不會替既有資料表補欄位，這裡逐一補上
 MIGRATIONS = [
     ("meal_order", "merged_into", "INTEGER"),
+    ("meal_order", "guests", "INTEGER"),
     ("order_line", "paid_qty", "INTEGER NOT NULL DEFAULT 0"),
     ("order_line", "origin", "TEXT"),
 ]
