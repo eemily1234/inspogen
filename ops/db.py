@@ -78,6 +78,32 @@ CREATE TABLE IF NOT EXISTS ledger (
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+-- 餐點點餐：訂單（一桌一張未結帳訂單，可多次加點）與品項
+CREATE TABLE IF NOT EXISTS meal_order (
+    id INTEGER PRIMARY KEY,
+    order_type TEXT NOT NULL CHECK (order_type IN ('dine_in','takeout')),
+    table_no TEXT,               -- 內用桌號
+    pickup_no INTEGER,           -- 外帶取餐號（每日從 1 起算）
+    note TEXT,                   -- 整單備註（過敏、趕時間…）
+    status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','paid','cancelled')),
+    sale_id INTEGER REFERENCES sale(id),
+    created_by INTEGER REFERENCES user(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS order_line (
+    id INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES meal_order(id),
+    round_no INTEGER NOT NULL DEFAULT 1,   -- 第幾次下單（>1 為加點）
+    item_id INTEGER NOT NULL REFERENCES item(id),
+    qty INTEGER NOT NULL CHECK (qty > 0),
+    unit_price INTEGER NOT NULL,           -- 下單當下的價格
+    note TEXT,                              -- 特殊需求（少辣、不要香菜…）
+    status TEXT NOT NULL DEFAULT 'new'
+        CHECK (status IN ('new','preparing','ready','served','cancelled')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS ix_oline_order ON order_line(order_id);
+
 -- Line 記帳：綁定 Line 帳號到系統使用者（僅老闆）
 CREATE TABLE IF NOT EXISTS line_user (
     line_user_id TEXT PRIMARY KEY,
