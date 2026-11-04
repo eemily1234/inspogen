@@ -1,7 +1,8 @@
-# 營運系統設計（v2，依清晰版組織圖）
+# 營運系統設計（v3，依清晰版組織圖＋已確認事項）
 
 > v2 以第二張清晰組織圖為主架構；第一張草圖的概念（COP 核心、錢貨一起、Line 記帳、每週貼文）整合進各模組。
-> 字跡仍不確定處標記「❓」，集中在第 8 節請您確認。
+> **已確認**：第三框＝「營運」（含保健品、有機商品、餐點）；最右框＝「數位」（POS、內部同步、進／銷貨）；Uber 指 Uber Eats，需**自動串接**；業務**零售＋餐飲**皆有；**4 人**使用；**需要電子發票**。
+> 尚待確認項目集中在第 8 節。
 
 ## 1. 組織圖解讀
 
@@ -11,10 +12,10 @@
 |---|---|---|
 | **帳務** | 所有成本、收入、支出、報表 | 總帳、成本／收入／支出登錄、各式報表 |
 | **庫存** | POS＋進銷貨；即時存貨／預警 | 即時存貨、低庫存預警，由 POS 與進銷貨驅動 |
-| **商品** ❓（框內字像「營運」或「營養」） | 保健品、有機商品，旁邊另有一個字（上架？❓） | 商品主檔，兩大分類：保健、有機 |
+| **營運** | 保健品、有機商品、餐點 | 商品與餐點主檔；餐點含配方（用哪些食材），賣出時自動扣食材庫存 |
 | **行銷** | Line、Fb、Uber、Google Maps | 五個通路的貼文／上架／評論管理 |
 | **客服** | Tel ＋ Line | 電話與 Line 客人問題紀錄、回覆、FAQ |
-| **據點** ❓（像「據位／櫃位」） | POS、內…同步、進／銷貨 | 門市 POS，與庫存內部同步進銷貨 |
+| **數位** | POS、內部同步、進／銷貨 | 數位化核心：POS、各系統內部同步、進銷貨單、電子發票、Uber Eats 串接 |
 
 > 第一張圖的 COP 在這張圖對應「公司」這一層：六個模組共用同一份資料，COP = 共用的資料核心。
 
@@ -25,22 +26,26 @@ flowchart TB
     CO[公司 / COP 資料核心]
     CO --> ACC[帳務]
     CO --> INV[庫存]
-    CO --> PRD[商品]
+    CO --> PRD[營運]
     CO --> MKT[行銷]
     CO --> CS[客服]
-    CO --> STORE[據點 POS]
+    CO --> STORE[數位：POS / 同步 / 進銷貨]
 
     PRD --> P1[保健品]
     PRD --> P2[有機商品]
+    PRD --> P3[餐點]
     MKT --> M1[Line]
     MKT --> M2[Fb]
-    MKT --> M3[Uber]
+    MKT --> M3[Uber Eats]
     MKT --> M4[Google Maps]
     CS --> C1[電話 Tel]
     CS --> C2[Line]
 
     STORE -- "銷貨：同時扣庫存、記收入" --> INV
     STORE --> ACC
+    STORE --> EINV[電子發票]
+    M3 -- "訂單自動進入" --> STORE
+    P3 -- "配方扣食材" --> INV
     INV -- "進貨：記成本" --> ACC
     INV -- "預警" --> ALERT[低庫存通知]
     ACC --> RPT[報表]
@@ -64,16 +69,18 @@ flowchart TB
 - **預警**：低於安全庫存時通知（Line／畫面紅字）；可延伸「預估可售天數」。
 - 進銷貨單：進貨單（供應商、成本）、銷貨由 POS 自動產生。
 
-### 3.3 商品
-- 商品主檔：名稱、分類（**保健／有機**）、單位、售價、成本、安全庫存、狀態。
+### 3.3 營運（商品與餐點）
+- 品項三類：**保健品、有機商品**（實體商品，直接扣庫存）、**餐點**（現做，不直接有庫存）。
+- 餐點有**配方**：一份餐點用多少食材；賣出一份，自動扣對應食材庫存，並可算出餐點成本與毛利。
+- 食材屬庫存的一部分（可獨立進貨，如第一張草圖的「食材」）。
 - 保健品建議加批號與有效期限（❓視需求）。
-- 「上架」：商品是否在各通路（Uber、Line 等）上架／可售的狀態（❓待確認這個字的意思）。
+- 各通路可售狀態：品項是否在 Uber Eats、Line 上架；食材缺貨時餐點可自動下架。
 
 ### 3.4 行銷
 - 通路：Line、Fb、Uber、Google Maps。
 - 功能：
   - 貼文／活動排程（Fb、Line；建議每週 1–2 篇，沿用第一張草圖）。
-  - Uber：菜單／商品上架狀態、訂單（如需串接）。
+  - **Uber Eats（自動串接）**：菜單與上架狀態同步、訂單自動進入 POS（見 3.6）。
   - Google Maps：商家資訊、評論回覆追蹤。
 - 每個客人與訂單記錄來源通路，可比較各通路成效。
 
@@ -83,38 +90,44 @@ flowchart TB
 - 彙整成 FAQ，可回饋給行銷（貼文題材）與 Line 自動回覆。
 - 電話只能手動登錄；Line 可由 webhook 自動進入收件匣。
 
-### 3.6 據點（POS）
-- 門市 POS：選品 → 結帳 → 完成。
+### 3.6 數位（POS、同步、進銷貨、發票、串接）
+- 門市 POS：選品／餐點 → 結帳 → 開立電子發票 → 完成。
 - **內部同步**：結帳立刻同步庫存與帳務（圖上「POS 內…同步進／銷貨」）。
+- **電子發票**：結帳時開立（可選載具、統編），作廢／折讓有對應流程。需選定發票服務商（❓）。
+- **Uber Eats 串接**：接收訂單 → 自動建立 `sale`（來源=uber）→ 同樣扣庫存、記帳；同步菜單與可售狀態；平台抽成記為支出。需向 Uber 申請 API 權限，時程不由我們控制，故排在後期，之前可先手動登錄。
 - 退貨／作廢：產生反向帳與反向庫存，不刪除。
-- 多據點時，庫存按據點分開（❓是否多據點）。
+- 目前以單一店面為前提，資料表保留 `store_id`，日後擴店不必改結構。
 
 ## 4. 資料模型
 
 ```
-store(id, name)                                              -- 據點
+store(id, name)                                              -- 店面（目前 1 間）
 customer(id, name, phone, line_id, fb_id, source_channel)
 inquiry(id, customer_id, channel[tel|line], content, tag, replied, replied_at)  -- 客服 / FAQ
 post(id, channel[line|fb|uber|gmaps], topic, scheduled_date, status)            -- 行銷
 
-item(id, name, category[health|organic], unit, price, cost, safety_stock, batch_tracking, active)
-item_listing(item_id, channel, listed)                       -- 「上架」❓
+item(id, name, type[product|ingredient|meal], category[health|organic|meal|ingredient], unit, price, cost, safety_stock, batch_tracking, active)
+recipe(meal_item_id, ingredient_item_id, qty)               -- 餐點配方
+item_listing(item_id, channel, listed)                       -- 各通路可售狀態
+user(id, name, role[owner|staff])                            -- 4 位使用者與權限
 stock_move(id, store_id, item_id, qty_delta, move_type[purchase|sale|return|adjust|scrap], ref_type, ref_id, batch_no, expiry, created_by, created_at)
 
 purchase(id, supplier, total, created_at); purchase_line(...)
-sale(id, store_id, customer_id, channel, total, pay_method, status[done|void], created_at); sale_line(...)
+sale(id, store_id, customer_id, channel[pos|uber|line], total, pay_method, status[done|void], invoice_no, external_order_id, created_at); sale_line(...)
+invoice(id, sale_id, number, carrier, tax_id, status[issued|void], issued_at)
 
 ledger(id, date, kind[income|cost|expense], amount, item_id?, store_id?, ref_type, ref_id, source[pos|purchase|line|manual], note, voucher_url)
 ```
 
 規則：
-- `sale` / `purchase` 建立時，同一交易內寫入 `ledger` 與 `stock_move`。
+- `sale` / `purchase` 建立時，同一交易內寫入 `ledger` 與 `stock_move`；賣餐點時依 `recipe` 展開成食材的 `stock_move`。
 - `stock_move` 只新增；更正用反向異動。
 - 現有庫存 = `SUM(qty_delta)`，按 `store_id, item_id` 分組。
 
 ## 5. 主要流程
 
-- **銷貨**：POS 結帳 → 寫 `sale` + `ledger(收入)` + `stock_move(−)` → 檢查預警。
+- **銷貨**：POS 結帳 → 寫 `sale` + `ledger(收入)` + `stock_move(−)`（餐點按配方扣食材）→ 開電子發票 → 檢查預警。
+- **Uber Eats 訂單**：平台推送訂單 → 自動建立 `sale` → 同上扣庫存、記帳、開票 → 食材不足時自動下架相關餐點。
 - **進貨**：建立進貨單（或 Line 傳「進貨 …」）→ `ledger(成本)` + `stock_move(+)`。
 - **客服循環**：客人電話／Line 詢問 → 登錄與回覆 → 標籤 → FAQ → 行銷題材。
 - **月結**：帳務報表匯出給會計。
@@ -134,16 +147,18 @@ ledger(id, date, kind[income|cost|expense], amount, item_id?, store_id?, ref_typ
 
 | 階段 | 內容 | 完成標準 |
 |---|---|---|
-| **P1** | 商品、庫存（即時＋預警）、據點 POS（錢貨同步）、基本帳務 | 一天營業的銷售、庫存、帳對得起來 |
-| **P2** | 進貨單、Line 記帳機器人 | 老闆用 Line 即可記帳與進貨 |
-| **P3** | 客服收件匣＋FAQ、行銷排程 | 客人問題與貼文都有紀錄 |
-| **P4** | 通路串接（Uber、Google Maps）、報表強化 | 看得到各通路成效與毛利 |
+| **P1** | 營運主檔（保健／有機／餐點＋配方）、庫存（即時＋預警）、POS（錢貨同步）、基本帳務、4 人帳號 | 一天營業的銷售、食材與庫存、帳對得起來 |
+| **P2** | **電子發票**、進貨單、Line 記帳機器人 | 結帳即開發票；老闆用 Line 記帳與進貨 |
+| **P3** | 客服收件匣＋FAQ、行銷排程（Line、Fb） | 客人問題與貼文都有紀錄 |
+| **P4** | **Uber Eats 自動串接**、Google Maps 評論追蹤、報表強化 | Uber 訂單自動入帳扣庫存；看得到各通路毛利 |
 
-## 8. 請您確認
+> 電子發票排在 P2、Uber Eats 排在 P4：前者是法規需求且與 POS 緊密相關，後者依賴平台 API 核准。若 Uber 訂單量大，可把 P4 的 Uber 部分提前。
 
-1. 第三個框（保健品／有機商品那個）寫的是「商品」、「營運」還是「營養」？旁邊那個字是「上架」嗎？
-2. 最右邊的框是「據點」、「櫃位」還是別的？是否有多個據點？
-3. Uber 是指 Uber Eats 外送嗎？是否需要自動串接訂單，還是先手動登錄？
-4. 業務型態：零售、餐飲或兩者？
-5. 使用人數、POS 用平板／電腦／手機？是否需要電子發票？
-6. 保健品是否需要批號與效期管理？
+## 8. 尚待確認
+
+1. **電子發票服務商**：要用哪一家（例如綠界、藍新等加值中心）？目前有申請了嗎？
+2. **Uber Eats**：店家是否已有 Uber Eats 商家帳號？API 權限需向 Uber 申請，我無法替您確認可否取得。
+3. **餐點配方**：是否願意為每道餐點建立食材用量？（做了才能自動扣食材、算成本；不做則餐點只記帳、不扣庫存。）
+4. **保健品批號／效期管理**：是否需要？
+5. **POS 裝置**：平板、電腦或手機？
+6. **4 位使用者角色**：老闆與店員的權限差異（例如店員不能看成本與報表）？
