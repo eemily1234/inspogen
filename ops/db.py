@@ -77,6 +77,31 @@ CREATE TABLE IF NOT EXISTS ledger (
     created_by INTEGER REFERENCES user(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+-- Line 記帳：綁定 Line 帳號到系統使用者（僅老闆）
+CREATE TABLE IF NOT EXISTS line_user (
+    line_user_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES user(id),
+    bound_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS bind_code (
+    code TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES user(id),
+    expires_at TEXT NOT NULL
+);
+-- Line 記帳紀錄：供「復原」使用；同一個 webhook 事件只處理一次
+CREATE TABLE IF NOT EXISTS line_log (
+    id INTEGER PRIMARY KEY,
+    line_user_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('expense','purchase')),
+    ref_id INTEGER NOT NULL,     -- expense: ledger.id；purchase: stock_move.id
+    undone INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE TABLE IF NOT EXISTS line_event (
+    event_id TEXT PRIMARY KEY,
+    received_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
 """
 
 

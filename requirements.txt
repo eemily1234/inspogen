@@ -1,3 +1,5 @@
 streamlit
 gtts
 requests
+fastapi
+uvicorn

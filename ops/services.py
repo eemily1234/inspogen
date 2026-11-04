@@ -209,6 +209,7 @@ def purchase(conn, item_id, qty, total_cost, batch_no=None, expiry=None,
              f"進貨 {item['name']} x{qty}", user_id),
         )
         conn.execute("UPDATE item SET cost=? WHERE id=?", (round(total_cost / qty), item_id))
+    return cur.lastrowid
 
 
 def adjust_stock(conn, item_id, qty_delta, reason, batch_no=None, expiry=None,
@@ -327,16 +328,17 @@ def recent_sales(conn, limit=20):
 
 
 # ───────────────────────── 帳務 ─────────────────────────
-def add_expense(conn, amount, note, user_id=None, on=None):
+def add_expense(conn, amount, note, user_id=None, on=None, source="manual"):
     if amount <= 0:
         raise OpsError("金額需大於 0")
     if not (note or "").strip():
         raise OpsError("請填寫說明")
     with conn:
-        conn.execute(
+        cur = conn.execute(
             "INSERT INTO ledger(date,kind,amount,source,note,created_by) VALUES (?,?,?,?,?,?)",
-            ((on or date.today()).isoformat(), "expense", int(amount), "manual", note, user_id),
+            ((on or date.today()).isoformat(), "expense", int(amount), source, note, user_id),
         )
+    return cur.lastrowid
 
 
 def report(conn, start, end):
@@ -364,3 +366,51 @@ def report(conn, start, end):
         "net": sums["income"] - sums["cost"] - sums["expense"],
         "by_category": by_cat,
     }
+
+
+# ───────────────────────── 復原（Line 記帳用） ─────────────────────────
+def undo_expense(conn, ledger_id, user_id=None, today=None):
+    """以反向分錄沖銷一筆支出。"""
+    today = (today or date.today()).isoformat()
+    row = conn.execute("SELECT * FROM ledger WHERE id=? AND kind='expense'", (ledger_id,)).fetchone()
+    if not row:
+        raise OpsError("找不到這筆支出")
+    with conn:
+        conn.execute(
+            "INSERT INTO ledger(date,kind,amount,source,ref_type,ref_id,note,created_by)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (today, "expense", -row["amount"], row["source"], "ledger", ledger_id,
+             f"復原：{row['note']}", user_id),
+        )
+
+
+def undo_purchase(conn, move_id, user_id=None, today=None):
+    """沖銷一筆進貨：庫存 −qty（原批次）、成本反向。該批庫存已被賣出則不能復原。"""
+    today = (today or date.today()).isoformat()
+    mv = conn.execute(
+        "SELECT * FROM stock_move WHERE id=? AND move_type='purchase'", (move_id,)).fetchone()
+    if not mv:
+        raise OpsError("找不到這筆進貨")
+    left = conn.execute(
+        "SELECT COALESCE(SUM(qty_delta),0) FROM stock_move WHERE item_id=? "
+        "AND batch_no IS ? AND expiry IS ?", (mv["item_id"], mv["batch_no"], mv["expiry"]),
+    ).fetchone()[0]
+    if left < mv["qty_delta"]:
+        raise OpsError("這批貨已有賣出，無法復原；請改用「盤點／報廢」調整")
+    cost = conn.execute(
+        "SELECT amount FROM ledger WHERE kind='cost' AND ref_type='stock_move' AND ref_id=?",
+        (move_id,)).fetchone()
+    with conn:
+        conn.execute(
+            "INSERT INTO stock_move(item_id,qty_delta,move_type,batch_no,expiry,ref_type,ref_id,note,created_by)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (mv["item_id"], -mv["qty_delta"], "adjust", mv["batch_no"], mv["expiry"],
+             "purchase", move_id, "復原進貨", user_id),
+        )
+        if cost:
+            conn.execute(
+                "INSERT INTO ledger(date,kind,amount,source,ref_type,ref_id,note,created_by)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (today, "cost", -cost["amount"], "purchase", "stock_move", move_id,
+                 "復原進貨", user_id),
+            )

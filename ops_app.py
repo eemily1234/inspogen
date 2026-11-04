@@ -3,7 +3,7 @@ from datetime import date, timedelta
 
 import streamlit as st
 
-from ops import db, services as s
+from ops import db, linebot, services as s
 
 st.set_page_config(page_title="營運系統", page_icon="🧾", layout="centered")
 
@@ -246,6 +246,19 @@ def users_page():
     st.header("👥 使用者（最多 4 人）")
     for u in conn.execute("SELECT name, role FROM user WHERE active=1"):
         st.write(f"{u['name']}　{'老闆' if u['role'] == s.OWNER else '店員'}")
+    st.subheader("Line 記帳綁定")
+    if st.button("產生 Line 綁定碼", width="stretch"):
+        try:
+            code = linebot.create_bind_code(conn, st.session_state.user["id"])
+            st.success(f"綁定碼：**{code}**（10 分鐘內有效）。到 Line 官方帳號傳：綁定 {code}")
+        except s.OpsError as e:
+            st.error(str(e))
+    bound = conn.execute(
+        "SELECT u.name, l.bound_at FROM line_user l JOIN user u ON u.id=l.user_id").fetchall()
+    for b in bound:
+        st.caption(f"已綁定：{b['name']}（{b['bound_at']}）")
+    st.divider()
+    st.subheader("新增使用者")
     with st.form("newuser", clear_on_submit=True):
         name = st.text_input("姓名")
         role = st.selectbox("角色", [s.STAFF, s.OWNER], format_func=lambda r: "店員" if r == s.STAFF else "老闆")

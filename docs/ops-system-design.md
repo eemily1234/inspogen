@@ -147,7 +147,7 @@ ledger(id, date, kind[income|cost|expense], amount, item_id?, store_id?, ref_typ
 | 階段 | 內容 | 完成標準 |
 |---|---|---|
 | **P1** 開發中 | 營運主檔（保健／有機／餐點）、庫存（批號效期＋預警）、POS（平板／手機，錢貨同步）、基本帳務、4 人帳號與權限 | 一天營業的銷售、庫存、帳對得起來 |
-| **P2** | 進貨單強化、Line 記帳機器人（電子發票待服務商確定後加入） | 老闆用 Line 記帳與進貨 |
+| **P2** 已實作（待實機測試） | Line 記帳機器人（支出、進貨、庫存、報表、復原；見 `docs/line-setup.md`）。電子發票待服務商確定後加入 | 老闆用 Line 記帳與進貨 |
 | **P3** | 客服收件匣＋FAQ、行銷排程（Line、Fb） | 客人問題與貼文都有紀錄 |
 | **P4** | Uber Eats 自動串接、Google Maps 評論追蹤、報表強化 | Uber 訂單自動入帳扣庫存；看得到各通路毛利 |
 
@@ -166,6 +166,7 @@ ledger(id, date, kind[income|cost|expense], amount, item_id?, store_id?, ref_typ
 
 ## 9. P1 實作說明
 
+- P2 Line 記帳：`uvicorn line_server:app`，設定見 `docs/line-setup.md`。
 - 入口：`streamlit run ops_app.py`（既有的 `app.py` 不變）。
 - 程式：`ops/db.py`（資料表）、`ops/services.py`（錢貨同步等商業規則）、`ops_app.py`（畫面）、`tests/test_services.py`。
 - 資料庫：SQLite，預設 `ops.db`，可用環境變數 `OPS_DB` 指定路徑。第一次開啟會要求設定老闆 PIN。
