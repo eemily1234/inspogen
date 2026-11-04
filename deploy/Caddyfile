@@ -1,0 +1,31 @@
+# Caddy 反向代理：自動 HTTPS。環境變數由 docker-compose.yml 傳入。
+{$DOMAIN} {
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# 營運後台：除了 App 本身的登入，再加一層 Caddy 密碼保護（帳號密碼雜湊用 caddy hash-password 產生）
+	@admin path /admin /admin/*
+	handle @admin {
+		basicauth {
+			{$ADMIN_USER} {$ADMIN_PASSWORD_HASH}
+		}
+		reverse_proxy admin:8501
+	}
+
+	# Webhook 由 Line / Uber 呼叫，不能加密碼；它們各自用簽章驗證，簽章不對一律拒絕
+	@hooks path /line/* /uber/*
+	handle @hooks {
+		reverse_proxy hooks:8000
+	}
+
+	# 其他一律是餐點點餐系統（網站首頁）
+	handle {
+		reverse_proxy meal:8502
+	}
+}
