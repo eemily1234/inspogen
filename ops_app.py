@@ -23,7 +23,7 @@ def login_view():
         with st.form("first"):
             name = st.text_input("姓名")
             pin = st.text_input("PIN（至少 4 位數字）", type="password")
-            if st.form_submit_button("建立老闆帳號", width="stretch"):
+            if st.form_submit_button("建立老闆帳號", use_container_width=True):
                 try:
                     s.create_user(conn, name, s.OWNER, pin)
                     st.rerun()
@@ -33,7 +33,7 @@ def login_view():
     with st.form("login"):
         name = st.text_input("姓名")
         pin = st.text_input("PIN", type="password")
-        if st.form_submit_button("登入", width="stretch"):
+        if st.form_submit_button("登入", use_container_width=True):
             user = s.authenticate(conn, name, pin)
             if user:
                 st.session_state.user = user
@@ -55,7 +55,7 @@ def pos_page():
                 label = f"{it['name']}　${it['price']}"
                 if it["type"] == "product":
                     label += f"　（庫存 {s.stock_level(conn, it['id'])}）"
-                if st.button(label, key=f"add{it['id']}", width="stretch"):
+                if st.button(label, key=f"add{it['id']}", use_container_width=True):
                     cart[it["id"]] = cart.get(it["id"], 0) + 1
                     st.rerun()
 
@@ -80,7 +80,7 @@ def pos_page():
         st.markdown(f"### 合計　${total}")
         pay = st.radio("付款方式", PAY, horizontal=True)
         c1, c2 = st.columns(2)
-        if c1.button("✅ 結帳", type="primary", width="stretch"):
+        if c1.button("✅ 結帳", type="primary", use_container_width=True):
             try:
                 sid = s.sell(conn, list(cart.items()), pay, user["id"])
                 st.session_state.cart = {}
@@ -88,7 +88,7 @@ def pos_page():
                 st.rerun()
             except s.OpsError as e:
                 st.error(str(e))
-        if c2.button("清空", width="stretch"):
+        if c2.button("清空", use_container_width=True):
             st.session_state.cart = {}
             st.rerun()
     if msg := st.session_state.pop("last_sale", None):
@@ -124,7 +124,7 @@ def stock_page():
     names = {"name": "品名", "qty": "庫存", "unit": "單位", "safety_stock": "安全庫存",
              "cost": "成本", "value": "庫存金額"}
     st.dataframe([{names.get(c, c): r[c] for c in cols} for r in rows],
-                 width="stretch", hide_index=True)
+                 use_container_width=True, hide_index=True)
     st.subheader("批號與效期")
     for r in rows:
         bs = s.batches(conn, r["id"])
@@ -149,7 +149,7 @@ def items_page():
             cost = st.number_input("成本（餐點可填單份成本；商品進貨時自動更新）", 0, step=10)
             unit = st.text_input("單位", "件")
             safety = st.number_input("安全庫存（僅商品）", 0)
-            if st.form_submit_button("新增", width="stretch"):
+            if st.form_submit_button("新增", use_container_width=True):
                 try:
                     s.add_item(conn, name, cat, price, cost, unit, safety if cat != "meal" else 0)
                     st.success("已新增")
@@ -159,7 +159,7 @@ def items_page():
         st.caption("目前品項")
         st.dataframe([{"品名": i["name"], "分類": CAT[i["category"]], "售價": i["price"],
                        "成本": i["cost"], "安全庫存": i["safety_stock"]} for i in all_items],
-                     width="stretch", hide_index=True)
+                     use_container_width=True, hide_index=True)
 
     with t2:
         if not products:
@@ -172,7 +172,7 @@ def items_page():
                 batch = st.text_input("批號（保健品必填）")
                 has_exp = st.checkbox("填寫有效期限", value=True)
                 exp = st.date_input("有效期限（保健品必填）", date.today() + timedelta(days=365))
-                if st.form_submit_button("進貨入庫", width="stretch"):
+                if st.form_submit_button("進貨入庫", use_container_width=True):
                     try:
                         s.purchase(conn, it["id"], qty, total, batch,
                                    exp.isoformat() if has_exp else None, user["id"])
@@ -189,7 +189,7 @@ def items_page():
                 batch = st.text_input("批號（調升保健品必填 / 報廢請填原批號）")
                 exp = st.text_input("有效期限 YYYY-MM-DD（調升保健品必填）")
                 reason = st.text_input("原因")
-                if st.form_submit_button("送出", width="stretch"):
+                if st.form_submit_button("送出", use_container_width=True):
                     try:
                         s.adjust_stock(conn, it["id"], delta, reason, batch, exp or None,
                                        user["id"], scrap=(kind == "報廢"))
@@ -214,12 +214,12 @@ def ledger_page():
                f"已售商品成本 ${r['cogs']:,}（毛利 = 收入 − 已售商品成本；現金淨額 = 收入 − 進貨成本 − 支出）")
     if r["by_category"]:
         st.dataframe([{"分類": CAT[x["category"]], "營收": x["revenue"], "數量": x["qty"]}
-                      for x in r["by_category"]], width="stretch", hide_index=True)
+                      for x in r["by_category"]], use_container_width=True, hide_index=True)
     with st.expander("登錄支出"):
         with st.form("exp", clear_on_submit=True):
             amt = st.number_input("金額", 0, step=10)
             note = st.text_input("說明（例：水電、租金）")
-            if st.form_submit_button("記一筆支出", width="stretch"):
+            if st.form_submit_button("記一筆支出", use_container_width=True):
                 try:
                     s.add_expense(conn, amt, note, user["id"])
                     st.rerun()
@@ -231,7 +231,7 @@ def ledger_page():
     kinds = {"income": "收入", "cost": "進貨成本", "expense": "支出"}
     data = [{"日期": x["date"], "類型": kinds[x["kind"]], "金額": x["amount"], "說明": x["note"]}
             for x in rows]
-    st.dataframe(data, width="stretch", hide_index=True)
+    st.dataframe(data, use_container_width=True, hide_index=True)
     if data:
         import csv, io
         buf = io.StringIO()
@@ -247,7 +247,7 @@ def users_page():
     for u in conn.execute("SELECT name, role FROM user WHERE active=1"):
         st.write(f"{u['name']}　{'老闆' if u['role'] == s.OWNER else '店員'}")
     st.subheader("Line 記帳綁定")
-    if st.button("產生 Line 綁定碼", width="stretch"):
+    if st.button("產生 Line 綁定碼", use_container_width=True):
         try:
             code = linebot.create_bind_code(conn, st.session_state.user["id"])
             st.success(f"綁定碼：**{code}**（10 分鐘內有效）。到 Line 官方帳號傳：綁定 {code}")
@@ -263,7 +263,7 @@ def users_page():
         name = st.text_input("姓名")
         role = st.selectbox("角色", [s.STAFF, s.OWNER], format_func=lambda r: "店員" if r == s.STAFF else "老闆")
         pin = st.text_input("PIN（至少 4 位數字）", type="password")
-        if st.form_submit_button("新增使用者", width="stretch"):
+        if st.form_submit_button("新增使用者", use_container_width=True):
             try:
                 s.create_user(conn, name, role, pin)
                 st.rerun()
