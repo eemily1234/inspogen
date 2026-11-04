@@ -1,0 +1,277 @@
+"""營運系統 P1：POS、庫存、營運主檔、帳務。啟動：streamlit run ops_app.py"""
+from datetime import date, timedelta
+
+import streamlit as st
+
+from ops import db, services as s
+
+st.set_page_config(page_title="營運系統", page_icon="🧾", layout="centered")
+
+CAT = {"health": "保健品", "organic": "有機商品", "meal": "餐點"}
+PAY = ["現金", "轉帳", "行動支付", "信用卡"]
+
+
+# 每次執行畫面都開新連線：SQLite 開啟很快，也避免多使用者共用連線的執行緒問題
+conn = db.connect()
+
+
+# ───────────────────────── 登入 ─────────────────────────
+def login_view():
+    st.title("🧾 營運系統")
+    if not s.has_users(conn):
+        st.info("第一次使用：請設定老闆帳號")
+        with st.form("first"):
+            name = st.text_input("姓名")
+            pin = st.text_input("PIN（至少 4 位數字）", type="password")
+            if st.form_submit_button("建立老闆帳號", width="stretch"):
+                try:
+                    s.create_user(conn, name, s.OWNER, pin)
+                    st.rerun()
+                except s.OpsError as e:
+                    st.error(str(e))
+        return
+    with st.form("login"):
+        name = st.text_input("姓名")
+        pin = st.text_input("PIN", type="password")
+        if st.form_submit_button("登入", width="stretch"):
+            user = s.authenticate(conn, name, pin)
+            if user:
+                st.session_state.user = user
+                st.rerun()
+            st.error("姓名或 PIN 錯誤")
+
+
+# ───────────────────────── POS ─────────────────────────
+def pos_page():
+    user = st.session_state.user
+    st.header("🛒 POS")
+    cart = st.session_state.setdefault("cart", {})
+    items = {i["id"]: i for i in s.list_items(conn)}
+
+    tabs = st.tabs([CAT[c] for c in CAT])
+    for tab, cat in zip(tabs, CAT):
+        with tab:
+            for it in (i for i in items.values() if i["category"] == cat):
+                label = f"{it['name']}　${it['price']}"
+                if it["type"] == "product":
+                    label += f"　（庫存 {s.stock_level(conn, it['id'])}）"
+                if st.button(label, key=f"add{it['id']}", width="stretch"):
+                    cart[it["id"]] = cart.get(it["id"], 0) + 1
+                    st.rerun()
+
+    st.subheader("購物車")
+    if not cart:
+        st.caption("尚未選擇品項")
+    total = 0
+    for iid in list(cart):
+        it = items.get(iid)
+        if not it:
+            cart.pop(iid)
+            continue
+        c1, c2 = st.columns([3, 2])
+        c1.write(f"**{it['name']}**　${it['price']}")
+        qty = c2.number_input("數量", 0, 999, cart[iid], key=f"q{iid}", label_visibility="collapsed")
+        if qty == 0:
+            cart.pop(iid)
+            st.rerun()
+        cart[iid] = qty
+        total += it["price"] * qty
+    if cart:
+        st.markdown(f"### 合計　${total}")
+        pay = st.radio("付款方式", PAY, horizontal=True)
+        c1, c2 = st.columns(2)
+        if c1.button("✅ 結帳", type="primary", width="stretch"):
+            try:
+                sid = s.sell(conn, list(cart.items()), pay, user["id"])
+                st.session_state.cart = {}
+                st.session_state.last_sale = f"已結帳，單號 #{sid}，合計 ${total}"
+                st.rerun()
+            except s.OpsError as e:
+                st.error(str(e))
+        if c2.button("清空", width="stretch"):
+            st.session_state.cart = {}
+            st.rerun()
+    if msg := st.session_state.pop("last_sale", None):
+        st.success(msg)
+
+    if s.can(user, "void"):
+        with st.expander("最近銷貨 / 作廢"):
+            for r in s.recent_sales(conn, 10):
+                c1, c2 = st.columns([4, 1])
+                c1.write(f"#{r['id']}　{r['created_at']}　${r['total']}　{r['pay_method']}　"
+                         + ("🚫作廢" if r["status"] == "void" else ""))
+                if r["status"] == "done" and c2.button("作廢", key=f"v{r['id']}"):
+                    s.void_sale(conn, r["id"], user["id"])
+                    st.rerun()
+
+
+# ───────────────────────── 庫存 ─────────────────────────
+def stock_page():
+    user = st.session_state.user
+    owner = s.can(user, "view_cost")
+    st.header("📦 庫存")
+    low = s.low_stock(conn)
+    if low:
+        st.warning("低庫存：" + "、".join(f"{r['name']}（{r['qty']}）" for r in low))
+    exp = s.expiring(conn, days=30)
+    if exp:
+        st.error("即將到期（30 天內）：" + "、".join(
+            f"{r['name']} 批號{r['batch_no']} {r['expiry']}（{r['qty']}）" for r in exp))
+    rows = s.stock_overview(conn, with_cost=owner)
+    for r in rows:
+        r["分類"] = CAT[r["category"]]
+    cols = ["name", "分類", "qty", "unit", "safety_stock"] + (["cost", "value"] if owner else [])
+    names = {"name": "品名", "qty": "庫存", "unit": "單位", "safety_stock": "安全庫存",
+             "cost": "成本", "value": "庫存金額"}
+    st.dataframe([{names.get(c, c): r[c] for c in cols} for r in rows],
+                 width="stretch", hide_index=True)
+    st.subheader("批號與效期")
+    for r in rows:
+        bs = s.batches(conn, r["id"])
+        if bs:
+            st.caption(f"**{r['name']}**： " + "；".join(
+                f"{b['batch_no'] or '無批號'} / {b['expiry'] or '無效期'} × {b['qty']}" for b in bs))
+
+
+# ───────────────────────── 營運主檔 + 進貨（老闆） ─────────────────────────
+def items_page():
+    user = st.session_state.user
+    st.header("🏷️ 營運主檔與進貨")
+    t1, t2, t3 = st.tabs(["新增品項", "進貨", "盤點 / 報廢"])
+    all_items = s.list_items(conn)
+    products = [i for i in all_items if i["type"] == "product"]
+
+    with t1:
+        with st.form("additem", clear_on_submit=True):
+            name = st.text_input("品名")
+            cat = st.selectbox("分類", list(CAT), format_func=CAT.get)
+            price = st.number_input("售價", 0, step=10)
+            cost = st.number_input("成本（餐點可填單份成本；商品進貨時自動更新）", 0, step=10)
+            unit = st.text_input("單位", "件")
+            safety = st.number_input("安全庫存（僅商品）", 0)
+            if st.form_submit_button("新增", width="stretch"):
+                try:
+                    s.add_item(conn, name, cat, price, cost, unit, safety if cat != "meal" else 0)
+                    st.success("已新增")
+                    st.rerun()
+                except s.OpsError as e:
+                    st.error(str(e))
+        st.caption("目前品項")
+        st.dataframe([{"品名": i["name"], "分類": CAT[i["category"]], "售價": i["price"],
+                       "成本": i["cost"], "安全庫存": i["safety_stock"]} for i in all_items],
+                     width="stretch", hide_index=True)
+
+    with t2:
+        if not products:
+            st.info("請先新增商品（保健品或有機商品）")
+        else:
+            with st.form("purchase", clear_on_submit=True):
+                it = st.selectbox("商品", products, format_func=lambda i: f"{i['name']}（{CAT[i['category']]}）")
+                qty = st.number_input("數量", 1)
+                total = st.number_input("進貨總金額", 0, step=10)
+                batch = st.text_input("批號（保健品必填）")
+                has_exp = st.checkbox("填寫有效期限", value=True)
+                exp = st.date_input("有效期限（保健品必填）", date.today() + timedelta(days=365))
+                if st.form_submit_button("進貨入庫", width="stretch"):
+                    try:
+                        s.purchase(conn, it["id"], qty, total, batch,
+                                   exp.isoformat() if has_exp else None, user["id"])
+                        st.success("已入庫並記成本")
+                    except s.OpsError as e:
+                        st.error(str(e))
+
+    with t3:
+        if products:
+            with st.form("adjust", clear_on_submit=True):
+                it = st.selectbox("商品", products, format_func=lambda i: i["name"], key="adj_it")
+                kind = st.radio("類型", ["盤點調整", "報廢"], horizontal=True)
+                delta = st.number_input("數量（調降填負數）", value=-1, step=1)
+                batch = st.text_input("批號（調升保健品必填 / 報廢請填原批號）")
+                exp = st.text_input("有效期限 YYYY-MM-DD（調升保健品必填）")
+                reason = st.text_input("原因")
+                if st.form_submit_button("送出", width="stretch"):
+                    try:
+                        s.adjust_stock(conn, it["id"], delta, reason, batch, exp or None,
+                                       user["id"], scrap=(kind == "報廢"))
+                        st.success("已記錄")
+                    except s.OpsError as e:
+                        st.error(str(e))
+
+
+# ───────────────────────── 帳務報表（老闆） ─────────────────────────
+def ledger_page():
+    user = st.session_state.user
+    st.header("📒 帳務報表")
+    c1, c2 = st.columns(2)
+    start = c1.date_input("起", date.today().replace(day=1))
+    end = c2.date_input("迄", date.today())
+    r = s.report(conn, start, end)
+    a, b, c = st.columns(3)
+    a.metric("收入", f"${r['income']:,}")
+    b.metric("毛利", f"${r['gross_profit']:,}")
+    c.metric("現金淨額", f"${r['net']:,}")
+    st.caption(f"進貨成本 ${r['purchase_cost']:,}　支出 ${r['expense']:,}　"
+               f"已售商品成本 ${r['cogs']:,}（毛利 = 收入 − 已售商品成本；現金淨額 = 收入 − 進貨成本 − 支出）")
+    if r["by_category"]:
+        st.dataframe([{"分類": CAT[x["category"]], "營收": x["revenue"], "數量": x["qty"]}
+                      for x in r["by_category"]], width="stretch", hide_index=True)
+    with st.expander("登錄支出"):
+        with st.form("exp", clear_on_submit=True):
+            amt = st.number_input("金額", 0, step=10)
+            note = st.text_input("說明（例：水電、租金）")
+            if st.form_submit_button("記一筆支出", width="stretch"):
+                try:
+                    s.add_expense(conn, amt, note, user["id"])
+                    st.rerun()
+                except s.OpsError as e:
+                    st.error(str(e))
+    rows = conn.execute(
+        "SELECT date, kind, amount, source, note FROM ledger WHERE date BETWEEN ? AND ?"
+        " ORDER BY id DESC", (start.isoformat(), end.isoformat())).fetchall()
+    kinds = {"income": "收入", "cost": "進貨成本", "expense": "支出"}
+    data = [{"日期": x["date"], "類型": kinds[x["kind"]], "金額": x["amount"], "說明": x["note"]}
+            for x in rows]
+    st.dataframe(data, width="stretch", hide_index=True)
+    if data:
+        import csv, io
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=list(data[0]))
+        w.writeheader(); w.writerows(data)
+        st.download_button("⬇️ 匯出 CSV（給會計）", "﻿" + buf.getvalue(),
+                           file_name="ledger.csv", mime="text/csv")
+
+
+# ───────────────────────── 使用者（老闆） ─────────────────────────
+def users_page():
+    st.header("👥 使用者（最多 4 人）")
+    for u in conn.execute("SELECT name, role FROM user WHERE active=1"):
+        st.write(f"{u['name']}　{'老闆' if u['role'] == s.OWNER else '店員'}")
+    with st.form("newuser", clear_on_submit=True):
+        name = st.text_input("姓名")
+        role = st.selectbox("角色", [s.STAFF, s.OWNER], format_func=lambda r: "店員" if r == s.STAFF else "老闆")
+        pin = st.text_input("PIN（至少 4 位數字）", type="password")
+        if st.form_submit_button("新增使用者", width="stretch"):
+            try:
+                s.create_user(conn, name, role, pin)
+                st.rerun()
+            except s.OpsError as e:
+                st.error(str(e))
+
+
+# ───────────────────────── 導覽（依權限） ─────────────────────────
+if "user" not in st.session_state:
+    login_view()
+else:
+    user = st.session_state.user
+    pages = [st.Page(pos_page, title="POS", icon="🛒", url_path="pos"),
+             st.Page(stock_page, title="庫存", icon="📦", url_path="stock")]
+    if s.can(user, "report"):
+        pages += [st.Page(items_page, title="營運主檔/進貨", icon="🏷️", url_path="items"),
+                  st.Page(ledger_page, title="帳務報表", icon="📒", url_path="ledger"),
+                  st.Page(users_page, title="使用者", icon="👥", url_path="users")]
+    st.navigation(pages).run()
+    with st.sidebar:
+        st.caption(f"{user['name']}（{'老闆' if user['role'] == s.OWNER else '店員'}）")
+        if st.button("登出"):
+            del st.session_state["user"]
+            st.rerun()
