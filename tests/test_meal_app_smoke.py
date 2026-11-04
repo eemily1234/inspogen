@@ -102,3 +102,40 @@ def test_ops_backoffice_blocks_kitchen_account(tmp_path, monkeypatch):
     assert not at.exception, [e.value for e in at.exception]
     assert any("只能使用" in e.value for e in at.error)
     assert not at.header                                            # 沒有任何後台頁面被渲染
+
+
+def test_device_link_logs_in_kitchen_tablet_without_pin(tmp_path, monkeypatch):
+    c = _fresh(tmp_path, monkeypatch)
+    owner = s.authenticate(c, "老闆", "1234")
+    token = s.create_device_token(c, owner, 3, "廚房平板")
+    at = AppTest.from_file(APP, default_timeout=30)
+    at.query_params["device"] = token
+    at.run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("廚房" in h for h in _headers(at)) and not any("外場" in h for h in _headers(at))
+    assert at.session_state["user"]["kitchen"] == 1
+
+
+def test_bad_or_revoked_device_link_shows_login(tmp_path, monkeypatch):
+    c = _fresh(tmp_path, monkeypatch)
+    owner = s.authenticate(c, "老闆", "1234")
+    token = s.create_device_token(c, owner, 3, "廚房平板")
+    s.revoke_device_token(c, s.list_device_tokens(c)[0]["id"])
+    for tok in ("亂猜", token):
+        at = AppTest.from_file(APP, default_timeout=30)
+        at.query_params["device"] = tok
+        at.run()
+        assert not at.exception and "user" not in at.session_state
+        assert any(b.label == "登入" for b in at.button) or at.text_input
+
+
+def test_failed_uber_order_shows_warning_on_floor_and_kitchen(seeded):
+    o.record_external_event(seeded, "uber", "ord-1", "orders.notification", "failed", "RuntimeError: x")
+    at = run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("Uber 訂單處理失敗" in w.value for w in at.warning)
+
+
+def test_uber_eats_is_a_payment_option():
+    from ops.ui import PAY
+    assert "Uber Eats" in PAY

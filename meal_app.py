@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import streamlit as st
 
-from ops import db, orders, services as s
+from ops import db, orders, services as s, uber
 from ops.ui import PAY, login_view, sidebar_user
 
 st.set_page_config(page_title="餐點點餐系統", page_icon="🍽️", layout="wide",
@@ -122,6 +122,13 @@ def kitchen_banner(c):
     return ks["accepting"]
 
 
+def uber_alert(c):
+    """Uber 訂單處理失敗時的醒目提醒（不能默默漏單）。"""
+    n = orders.external_alerts(c)
+    if n:
+        st.warning(f"⚠️ 有 {n} 筆 Uber 訂單處理失敗（最近 3 小時），請到 Uber 商家平板確認，必要時手動補單。")
+
+
 def flow_strip(flow):
     nodes = []
     for k in FLOW_ORDER:
@@ -167,6 +174,7 @@ def _floor_board():
         st.session_state["floor_ready_seen"] = ready
 
         kitchen_banner(c)
+        uber_alert(c)
         st.markdown(flow_strip(ov["flow"]), unsafe_allow_html=True)
         st.caption("流程：下單 → 廚房接單 → 製作 → 上菜 → 用餐 → 結帳　｜　每 5 秒自動更新　｜　點桌子操作")
 
@@ -202,7 +210,8 @@ def _floor_board():
             st.subheader("🥡 外帶")
             for tk in ov["takeouts"]:
                 with st.container(border=True):
-                    st.markdown(f"{TILE[tk['stage']]} **{tk['where']}**　{orders.STAGE_LABEL[tk['stage']]}"
+                    icon = "🛵 " if tk["where"].startswith("Uber") else ""
+                    st.markdown(f"{TILE[tk['stage']]} {icon}**{tk['where']}**　{orders.STAGE_LABEL[tk['stage']]}"
                                 f"　⏱ {tk['wait']} 分鐘　${tk['unpaid_total']}")
                     if tk["to_serve"] and st.button(f"🛎️ 已取餐（{tk['to_serve']}）", key=f"tk_s{tk['order_id']}",
                                                     type="primary", use_container_width=True):
@@ -365,6 +374,7 @@ def order_page():
 def _kitchen_board():
     c = db.connect()
     try:
+        uber_alert(c)
         ks = orders.kitchen_status(c)
         if ks["accepting"]:
             st.markdown('<span class="badge-on">🟢 接單中</span>', unsafe_allow_html=True)
@@ -405,7 +415,9 @@ def _kitchen_board():
                 if st.button(label, key=f"k{t['order_id']}_{t['round_no']}", use_container_width=True,
                              type="primary" if t["status"] == "new" else "secondary"):
                     try:
-                        orders.advance_ticket(c, t["order_id"], t["round_no"])
+                        new_status = orders.advance_ticket(c, t["order_id"], t["round_no"])
+                        if new_status == "ready" and uber.UberConfig().configured:
+                            uber.notify_ready(c, uber.UberClient(), t["order_id"])   # 失敗只記錄，不影響店內作業
                     except s.OpsError as e:
                         st.error(str(e))
                     st.rerun()
@@ -557,7 +569,7 @@ def settings_page():
 
 # ───────────────────────── 導覽 ─────────────────────────
 if "user" not in st.session_state:
-    login_view(conn, "🍽️ 餐點點餐系統")
+    login_view(conn, "🍽️ 餐點點餐系統", allow_device=True)
 else:
     user = st.session_state.user
     orders.ensure_default_tables(conn)   # 第一次使用：1 樓 4 桌、2 樓 4 桌，每桌 4 人

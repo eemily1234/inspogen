@@ -15,6 +15,25 @@ CREATE TABLE IF NOT EXISTS user (
     active INTEGER NOT NULL DEFAULT 1
 );
 
+-- 登入失敗紀錄（防止暴力猜 PIN）
+CREATE TABLE IF NOT EXISTS login_attempt (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    at TEXT NOT NULL             -- ISO 時間，秒
+);
+CREATE INDEX IF NOT EXISTS ix_login_attempt_at ON login_attempt(at);
+
+-- 裝置登入連結（平板書籤）：只存雜湊，可撤銷。僅店員／廚房帳號可用，老闆不行。
+CREATE TABLE IF NOT EXISTS device_token (
+    id INTEGER PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL REFERENCES user(id),
+    label TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    last_used_at TEXT,
+    revoked INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS item (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -90,6 +109,9 @@ CREATE TABLE IF NOT EXISTS meal_order (
     sale_id INTEGER REFERENCES sale(id),
     merged_into INTEGER,         -- 併桌：此單已併入的訂單（status 會是 cancelled）
     guests INTEGER,              -- 用餐人數
+    source TEXT NOT NULL DEFAULT 'pos',   -- 訂單來源：pos（店內）/ uber（Uber Eats）
+    external_id TEXT,            -- 外部平台的訂單編號（用來防止重複建單）
+    external_label TEXT,         -- 外部平台顯示給人看的短編號
     created_by INTEGER REFERENCES user(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -108,6 +130,26 @@ CREATE TABLE IF NOT EXISTS order_line (
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS ix_oline_order ON order_line(order_id);
+-- 外部平台（Uber Eats）品項對應：平台品項 → 我們的菜單
+CREATE TABLE IF NOT EXISTS external_item_map (
+    source TEXT NOT NULL,
+    external_item_id TEXT NOT NULL,
+    item_id INTEGER NOT NULL REFERENCES item(id),
+    PRIMARY KEY (source, external_item_id)
+);
+-- 外部平台收到的原始資料與處理結果（除錯、對帳、失敗提醒用）
+CREATE TABLE IF NOT EXISTS external_event (
+    id INTEGER PRIMARY KEY,
+    source TEXT NOT NULL,
+    external_id TEXT,
+    event_type TEXT,
+    status TEXT NOT NULL,        -- ok / duplicate / denied / cancelled / failed
+    note TEXT,
+    payload TEXT,
+    received_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS ix_external_event_ext ON external_event(source, external_id);
+
 -- 桌位：分樓層，每桌座位數（預設 4 人）
 CREATE TABLE IF NOT EXISTS dining_table (
     id INTEGER PRIMARY KEY,
@@ -162,6 +204,9 @@ MIGRATIONS = [
     ("user", "kitchen", "INTEGER NOT NULL DEFAULT 0"),
     ("meal_order", "merged_into", "INTEGER"),
     ("meal_order", "guests", "INTEGER"),
+    ("meal_order", "source", "TEXT NOT NULL DEFAULT 'pos'"),
+    ("meal_order", "external_id", "TEXT"),
+    ("meal_order", "external_label", "TEXT"),
     ("order_line", "paid_qty", "INTEGER NOT NULL DEFAULT 0"),
     ("order_line", "origin", "TEXT"),
 ]
@@ -172,6 +217,9 @@ def migrate(conn):
         cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
         if col not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    # 欄位補齊後才能建立：同一個平台的同一張外部訂單只能有一張（防止重複建單）
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_order_external ON meal_order(source, external_id) "
+                 "WHERE external_id IS NOT NULL")
     conn.commit()
 
 
@@ -179,6 +227,9 @@ def connect(path=None):
     conn = sqlite3.connect(path or DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # 多個程式（網頁、廚房、webhook）同時讀寫同一個檔案：WAL 讓讀寫不互相擋，busy_timeout 讓碰撞時等待而不是報錯
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     conn.executescript(SCHEMA)
     migrate(conn)
     return conn

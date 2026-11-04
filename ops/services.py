@@ -4,8 +4,14 @@
 """
 import hashlib
 import hmac
+import os
 import secrets
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+
+MIN_PIN_LENGTH = int(os.environ.get("OPS_MIN_PIN_LENGTH", "4"))   # 對外上線建議設 6
+MAX_LOGIN_FAILS = 5          # 同一姓名 10 分鐘內最多失敗次數
+GLOBAL_LOGIN_FAILS = 30      # 全部姓名合計 10 分鐘內最多失敗次數
+LOCK_MINUTES = 10
 
 OWNER = "owner"
 STAFF = "staff"
@@ -31,8 +37,8 @@ def create_user(conn, name, role, pin):
         raise OpsError("請輸入姓名")
     if role not in (OWNER, STAFF, KITCHEN):
         raise OpsError("角色錯誤")
-    if not (pin or "").isdigit() or len(pin) < 4:
-        raise OpsError("PIN 需為至少 4 位數字")
+    if not (pin or "").isdigit() or len(pin) < MIN_PIN_LENGTH:
+        raise OpsError(f"PIN 需為至少 {MIN_PIN_LENGTH} 位數字")
     if conn.execute("SELECT COUNT(*) FROM user WHERE active=1").fetchone()[0] >= 4:
         raise OpsError("使用者已達 4 人上限")
     salt = secrets.token_hex(8)
@@ -48,13 +54,81 @@ def create_user(conn, name, role, pin):
     return cur.lastrowid
 
 
-def authenticate(conn, name, pin):
+def authenticate(conn, name, pin, now=None):
+    """驗證姓名與 PIN；成功回傳使用者 dict，失敗回傳 None。
+
+    防暴力破解：同一姓名 10 分鐘內失敗 5 次、或全部姓名合計失敗 30 次，就鎖定 10 分鐘
+    （鎖定期間連正確的 PIN 也不接受），丟出 OpsError。
+    """
+    now = now or datetime.now()
+    name = (name or "").strip()
+    since = (now - timedelta(minutes=LOCK_MINUTES)).isoformat(timespec="seconds")
+    fails = conn.execute("SELECT COUNT(*) FROM login_attempt WHERE name=? AND at>=?", (name, since)).fetchone()[0]
+    total = conn.execute("SELECT COUNT(*) FROM login_attempt WHERE at>=?", (since,)).fetchone()[0]
+    if fails >= MAX_LOGIN_FAILS or total >= GLOBAL_LOGIN_FAILS:
+        raise OpsError(f"登入失敗次數過多，請 {LOCK_MINUTES} 分鐘後再試")
+    row = conn.execute("SELECT * FROM user WHERE name=? AND active=1", (name,)).fetchone()
+    # 即使姓名不存在也做一次雜湊，避免從回應時間猜出帳號是否存在
+    ok = hmac.compare_digest(row["pin_hash"] if row else _hash("", "x"),
+                             _hash(pin or "", row["salt"] if row else "x")) and row is not None
+    with conn:
+        if ok:
+            conn.execute("DELETE FROM login_attempt WHERE name=?", (name,))
+        else:
+            conn.execute("INSERT INTO login_attempt(name, at) VALUES (?,?)",
+                         (name, now.isoformat(timespec="seconds")))
+            conn.execute("DELETE FROM login_attempt WHERE at < ?",
+                         ((now - timedelta(days=1)).isoformat(timespec="seconds"),))
+    return dict(row) if ok else None
+
+
+# ───────────────────────── 裝置登入連結（平板書籤） ─────────────────────────
+def _token_hash(token):
+    return hashlib.sha256((token or "").encode()).hexdigest()
+
+
+def create_device_token(conn, owner, user_id, label=None):
+    """老闆替店員／廚房帳號產生裝置登入連結用的密鑰。回傳明文密鑰（只會顯示這一次）。"""
+    if owner["role"] != OWNER or is_kitchen(owner):
+        raise OpsError("只有老闆可以產生裝置登入連結")
+    target = conn.execute("SELECT * FROM user WHERE id=? AND active=1", (user_id,)).fetchone()
+    if not target:
+        raise OpsError("找不到使用者")
+    if target["role"] == OWNER:
+        raise OpsError("老闆帳號不能使用裝置登入連結，請用姓名與 PIN 登入")
+    token = secrets.token_urlsafe(24)
+    with conn:
+        conn.execute("INSERT INTO device_token(token_hash,user_id,label) VALUES (?,?,?)",
+                     (_token_hash(token), user_id, (label or "").strip() or None))
+    return token
+
+
+def user_from_device_token(conn, token):
+    """用裝置密鑰換回使用者；已撤銷、帳號停用、老闆帳號都不行。"""
+    if not token:
+        return None
     row = conn.execute(
-        "SELECT * FROM user WHERE name=? AND active=1", ((name or "").strip(),)
-    ).fetchone()
-    if row and hmac.compare_digest(row["pin_hash"], _hash(pin or "", row["salt"])):
-        return dict(row)
-    return None
+        "SELECT d.id AS did, u.* FROM device_token d JOIN user u ON u.id=d.user_id "
+        "WHERE d.token_hash=? AND d.revoked=0 AND u.active=1 AND u.role!='owner'",
+        (_token_hash(token),)).fetchone()
+    if not row:
+        return None
+    with conn:
+        conn.execute("UPDATE device_token SET last_used_at=datetime('now','localtime') WHERE id=?", (row["did"],))
+    user = dict(row)
+    user.pop("did")
+    return user
+
+
+def list_device_tokens(conn):
+    return [dict(r) for r in conn.execute(
+        "SELECT d.id, d.label, d.created_at, d.last_used_at, d.revoked, u.name AS user_name "
+        "FROM device_token d JOIN user u ON u.id=d.user_id ORDER BY d.id DESC")]
+
+
+def revoke_device_token(conn, token_id):
+    with conn:
+        conn.execute("UPDATE device_token SET revoked=1 WHERE id=?", (token_id,))
 
 
 def is_kitchen(user):

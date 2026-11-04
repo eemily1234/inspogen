@@ -238,13 +238,37 @@ def users_page():
         name = st.text_input("姓名")
         role = st.selectbox("角色", [s.STAFF, s.KITCHEN, s.OWNER],
                             format_func={s.STAFF: "店員", s.KITCHEN: "廚房（只能用點餐、廚房頁）", s.OWNER: "老闆"}.get)
-        pin = st.text_input("PIN（至少 4 位數字）", type="password")
+        pin = st.text_input(f"PIN（至少 {s.MIN_PIN_LENGTH} 位數字）", type="password")
         if st.form_submit_button("新增使用者", use_container_width=True):
             try:
                 s.create_user(conn, name, role, pin)
                 st.rerun()
             except s.OpsError as e:
                 st.error(str(e))
+
+    st.divider()
+    st.subheader("📱 裝置登入連結（平板書籤）")
+    st.caption("給廚房／服務生的平板用：把連結存成書籤或加入主畫面，之後一點就登入，不必輸入 PIN。"
+               "連結等同密碼，只在產生時顯示一次；平板遺失或換人時請撤銷。老闆帳號不能使用。")
+    others = [dict(u) for u in conn.execute("SELECT id, name, role, kitchen FROM user WHERE active=1 AND role!='owner'")]
+    if others:
+        who = st.selectbox("給哪個帳號", others, format_func=lambda u: f"{u['name']}（{'廚房' if u['kitchen'] else '店員'}）")
+        label = st.text_input("裝置名稱", placeholder="例：廚房平板")
+        base = st.text_input("餐點系統網址", placeholder="例：https://你的網址/ 或 http://192.168.1.23:8502/")
+        if st.button("產生連結", use_container_width=True):
+            try:
+                tok = s.create_device_token(conn, st.session_state.user, who["id"], label)
+                st.success("已產生。請現在就複製到平板（關閉後不會再顯示）：")
+                st.code(f"{base.rstrip('/')}/?device={tok}" if base.strip() else f"?device={tok}", language=None)
+            except s.OpsError as e:
+                st.error(str(e))
+    for t in s.list_device_tokens(conn):
+        c1, c2 = st.columns([4, 1])
+        c1.write(f"{t['label'] or '（未命名）'}　{t['user_name']}　建立 {t['created_at']}"
+                 f"　最近使用 {t['last_used_at'] or '從未'}" + ("　🚫已撤銷" if t["revoked"] else ""))
+        if not t["revoked"] and c2.button("撤銷", key=f"rv{t['id']}"):
+            s.revoke_device_token(conn, t["id"])
+            st.rerun()
 
 
 # ───────────────────────── 導覽（依權限） ─────────────────────────

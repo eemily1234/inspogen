@@ -30,6 +30,8 @@
    pip install -r requirements.txt
    uvicorn line_server:app --host 0.0.0.0 --port 8000
    ```
+> 若用 `docs/deploy.md` 的部署方式，webhook 網址是 `https://你的網域/line/webhook`（Line 與 Uber 共用一個入口 `webhook_app.py`），憑證寫在 `.env`，不必手動執行下面的 uvicorn。
+
 4. Line 要求 webhook 是**公開的 HTTPS 網址**。測試可用 `cloudflared tunnel --url http://localhost:8000` 或 ngrok；正式使用建議部署到雲端主機。
 5. 在 Messaging API 頁填 Webhook URL：`https://你的網址/webhook`，開啟 **Use webhook**，並在 Line Official Account Manager 關閉「自動回應訊息」。
 6. 綁定：登入 `ops_app.py`（老闆）→「使用者」頁 →「產生 Line 綁定碼」→ 用手機加官方帳號好友，傳 `綁定 123456`。

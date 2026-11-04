@@ -4,7 +4,7 @@ import streamlit as st
 from . import services as s
 
 CAT = {"health": "保健品", "organic": "有機商品", "meal": "餐點"}
-PAY = ["現金", "轉帳", "行動支付", "信用卡"]
+PAY = ["現金", "轉帳", "行動支付", "信用卡", "Uber Eats"]
 
 
 def role_label(user):
@@ -13,14 +13,21 @@ def role_label(user):
     return "老闆" if user["role"] == s.OWNER else "店員"
 
 
-def login_view(conn, title):
-    """登入畫面；第一次使用會先建立老闆帳號。兩個 App 共用同一份使用者資料。"""
+def login_view(conn, title, allow_device=False):
+    """登入畫面；第一次使用會先建立老闆帳號。兩個 App 共用同一份使用者資料。
+
+    allow_device=True（只有餐點系統）：網址帶 ?device=密鑰 時自動登入（平板書籤，免輸入 PIN）。"""
+    if allow_device and not st.session_state.get("user"):
+        user = s.user_from_device_token(conn, st.query_params.get("device"))
+        if user:
+            st.session_state.user = user
+            st.rerun()
     st.title(title)
     if not s.has_users(conn):
         st.info("第一次使用：請設定老闆帳號")
         with st.form("first"):
             name = st.text_input("姓名")
-            pin = st.text_input("PIN（至少 4 位數字）", type="password")
+            pin = st.text_input(f"PIN（至少 {s.MIN_PIN_LENGTH} 位數字）", type="password")
             if st.form_submit_button("建立老闆帳號", use_container_width=True):
                 try:
                     s.create_user(conn, name, s.OWNER, pin)
@@ -32,7 +39,11 @@ def login_view(conn, title):
         name = st.text_input("姓名")
         pin = st.text_input("PIN", type="password")
         if st.form_submit_button("登入", use_container_width=True):
-            user = s.authenticate(conn, name, pin)
+            try:
+                user = s.authenticate(conn, name, pin)
+            except s.OpsError as e:   # 失敗次數過多被鎖定
+                st.error(str(e))
+                return
             if user:
                 st.session_state.user = user
                 st.rerun()

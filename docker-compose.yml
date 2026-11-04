@@ -1,0 +1,66 @@
+# 營運系統一鍵部署：docker compose up -d
+# 需要先複製 .env.example 成 .env 並填好（網域、密碼等）。詳見 docs/deploy.md
+x-app: &app
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  environment:
+    OPS_DB: /data/ops.db
+    TZ: ${TZ:-Asia/Taipei}
+    OPS_MIN_PIN_LENGTH: ${OPS_MIN_PIN_LENGTH:-6}
+  volumes:
+    - ops-data:/data
+
+services:
+  # 餐點點餐系統（平板、手機）— 網站首頁
+  meal:
+    <<: *app
+    command: >
+      streamlit run meal_app.py --server.port 8502 --server.address 0.0.0.0
+      --server.headless true --browser.gatherUsageStats false
+
+  # 營運後台（POS 商品、庫存、帳務、使用者）— /admin，外加 Caddy 密碼保護
+  admin:
+    <<: *app
+    command: >
+      streamlit run ops_app.py --server.port 8501 --server.address 0.0.0.0
+      --server.baseUrlPath admin --server.headless true --browser.gatherUsageStats false
+
+  # Line 記帳與 Uber Eats 的 webhook：/line/webhook、/uber/webhook
+  hooks:
+    <<: *app
+    command: uvicorn webhook_app:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*"
+
+  # 每日自動備份資料庫（保留 BACKUP_KEEP_DAYS 天）
+  backup:
+    <<: *app
+    command: python deploy/backup.py
+    # 不能用唯讀掛載：WAL 模式的資料庫即使只讀取也需要寫入共用記憶檔
+    volumes:
+      - ops-data:/data
+      - ./backups:/backups
+
+  # 自動申請並更新 HTTPS 憑證的反向代理
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - meal
+      - admin
+      - hooks
+
+volumes:
+  ops-data:
+  caddy-data:
+  caddy-config:

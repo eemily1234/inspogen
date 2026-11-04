@@ -164,3 +164,86 @@ def test_old_user_table_gets_kitchen_column(tmp_path):
     assert c.execute("SELECT kitchen FROM user").fetchone()[0] == 0          # 舊帳號不受影響
     s.create_user(c, "廚房", s.KITCHEN, "2222")
     assert s.authenticate(c, "廚房", "2222")["kitchen"] == 1
+
+
+# ───────────── 登入鎖定、裝置登入連結 ─────────────
+from datetime import datetime, timedelta  # noqa: E402
+
+
+def _users(conn):
+    s.create_user(conn, "老闆", s.OWNER, "1234")
+    s.create_user(conn, "小明", s.STAFF, "1111")
+    s.create_user(conn, "廚房", s.KITCHEN, "2222")
+
+
+def test_login_locks_after_5_failures_even_for_correct_pin(conn):
+    _users(conn)
+    t0 = datetime(2026, 11, 4, 12, 0, 0)
+    for i in range(5):
+        assert s.authenticate(conn, "小明", "0000", now=t0 + timedelta(seconds=i)) is None
+    with pytest.raises(s.OpsError, match="次數過多"):
+        s.authenticate(conn, "小明", "1111", now=t0 + timedelta(minutes=1))      # 對的 PIN 也不行
+    assert s.authenticate(conn, "老闆", "1234", now=t0 + timedelta(minutes=1))   # 其他帳號不受影響
+    assert s.authenticate(conn, "小明", "1111", now=t0 + timedelta(minutes=11))  # 10 分鐘後解鎖
+
+
+def test_success_resets_failure_count(conn):
+    _users(conn)
+    t0 = datetime(2026, 11, 4, 12, 0, 0)
+    for i in range(4):
+        s.authenticate(conn, "小明", "0000", now=t0 + timedelta(seconds=i))
+    assert s.authenticate(conn, "小明", "1111", now=t0 + timedelta(seconds=10))
+    for i in range(4):                                                            # 重新計算，不會被舊的失敗累積
+        s.authenticate(conn, "小明", "0000", now=t0 + timedelta(seconds=20 + i))
+    assert s.authenticate(conn, "小明", "1111", now=t0 + timedelta(seconds=30))
+
+
+def test_unknown_names_are_counted_and_global_throttle(conn):
+    _users(conn)
+    t0 = datetime(2026, 11, 4, 12, 0, 0)
+    for i in range(s.GLOBAL_LOGIN_FAILS):
+        s.authenticate(conn, f"猜{i}", "0000", now=t0 + timedelta(seconds=i))
+    with pytest.raises(s.OpsError):
+        s.authenticate(conn, "老闆", "1234", now=t0 + timedelta(seconds=40))      # 全域鎖定
+    assert s.authenticate(conn, "老闆", "1234", now=t0 + timedelta(minutes=11))
+
+
+def test_min_pin_length_is_configurable(conn, monkeypatch):
+    monkeypatch.setattr(s, "MIN_PIN_LENGTH", 6)
+    with pytest.raises(s.OpsError, match="6"):
+        s.create_user(conn, "老闆", s.OWNER, "1234")
+    s.create_user(conn, "老闆", s.OWNER, "123456")
+
+
+def test_device_token_lifecycle(conn):
+    _users(conn)
+    owner = s.authenticate(conn, "老闆", "1234")
+    kitchen_id = conn.execute("SELECT id FROM user WHERE name='廚房'").fetchone()[0]
+    owner_id = owner["id"]
+    token = s.create_device_token(conn, owner, kitchen_id, "廚房平板")
+    assert len(token) >= 30
+    stored = conn.execute("SELECT token_hash FROM device_token").fetchone()[0]
+    assert token not in stored and len(stored) == 64                              # 只存雜湊
+    u = s.user_from_device_token(conn, token)
+    assert u["name"] == "廚房" and u["kitchen"] == 1 and "pin_hash" in u
+    assert s.user_from_device_token(conn, "亂猜的") is None and s.user_from_device_token(conn, None) is None
+    assert s.list_device_tokens(conn)[0]["last_used_at"] is not None
+    s.revoke_device_token(conn, s.list_device_tokens(conn)[0]["id"])
+    assert s.user_from_device_token(conn, token) is None                          # 撤銷後失效
+    # 老闆不能被綁、只有老闆能建立
+    with pytest.raises(s.OpsError):
+        s.create_device_token(conn, owner, owner_id, "x")
+    staff = s.authenticate(conn, "小明", "1111")
+    with pytest.raises(s.OpsError):
+        s.create_device_token(conn, staff, kitchen_id, "x")
+
+
+def test_device_token_stops_working_when_user_deactivated(conn):
+    _users(conn)
+    owner = s.authenticate(conn, "老闆", "1234")
+    sid = conn.execute("SELECT id FROM user WHERE name='小明'").fetchone()[0]
+    token = s.create_device_token(conn, owner, sid)
+    assert s.user_from_device_token(conn, token)
+    with conn:
+        conn.execute("UPDATE user SET active=0 WHERE id=?", (sid,))
+    assert s.user_from_device_token(conn, token) is None

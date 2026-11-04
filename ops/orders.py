@@ -111,7 +111,11 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
 
 
 def _where(order):
-    return f"桌 {order['table_no']}" if order["order_type"] == "dine_in" else f"外帶 #{order['pickup_no']}"
+    if order["order_type"] == "dine_in":
+        return f"桌 {order['table_no']}"
+    if order["source"] == "uber":
+        return f"Uber {order['external_label'] or order['external_id'] or ''}".strip()
+    return f"外帶 #{order['pickup_no']}"
 
 
 def _ticket_status(statuses):
@@ -123,6 +127,7 @@ def kitchen_tickets(conn):
     一張單 = 同一訂單的同一輪下單。"""
     rows = conn.execute(
         """SELECT o.id AS order_id, o.order_type, o.table_no, o.pickup_no, o.note AS order_note,
+                  o.source, o.external_label, o.external_id,
                   l.id AS line_id, l.round_no, l.qty, l.note, l.origin, l.status, l.created_at, i.name
            FROM order_line l JOIN meal_order o ON o.id=l.order_id JOIN item i ON i.id=l.item_id
            WHERE o.status='open' AND l.status IN ('new','preparing')
@@ -469,3 +474,111 @@ def ensure_default_tables(conn):
         return False
     setup_tables(conn, DEFAULT_FLOORS, seats=DEFAULT_SEATS)
     return True
+
+
+# ───────────────────────── 外部平台訂單（Uber Eats） ─────────────────────────
+class KitchenPaused(OpsError):
+    """廚房暫停接單：外部訂單應被拒絕。"""
+
+
+def _map_external_item(conn, source, ext_item):
+    """平台品項 → 我們的菜單品項。順序：已記住的對應 → 品名完全相同的餐點 → 建立「未對應」暫存品項。
+    回傳 (item, 是否為未對應)。暫存品項停售（不會出現在菜單），但訂單與結帳都能正常使用。"""
+    ext_id = (ext_item.get("external_item_id") or "").strip()
+    name = (ext_item.get("name") or "").strip()
+    if ext_id:
+        row = conn.execute(
+            "SELECT i.* FROM external_item_map m JOIN item i ON i.id=m.item_id "
+            "WHERE m.source=? AND m.external_item_id=?", (source, ext_id)).fetchone()
+        if row:
+            return dict(row), bool(row["name"].startswith("[Uber] "))
+    row = conn.execute("SELECT * FROM item WHERE type='meal' AND active=1 AND name=?", (name,)).fetchone()
+    placeholder = False
+    if not row:
+        label = f"[Uber] {name or ext_id or '未命名品項'}"
+        row = conn.execute("SELECT * FROM item WHERE name=?", (label,)).fetchone()
+        if not row:
+            cur = conn.execute("INSERT INTO item(name,type,category,unit,price,cost,active) "
+                               "VALUES (?,?,?,?,?,?,0)", (label, "meal", "meal", "份", 0, 0))
+            row = conn.execute("SELECT * FROM item WHERE id=?", (cur.lastrowid,)).fetchone()
+        placeholder = True
+    if ext_id:
+        conn.execute("INSERT OR IGNORE INTO external_item_map(source,external_item_id,item_id) VALUES (?,?,?)",
+                     (source, ext_id, row["id"]))
+    return dict(row), placeholder
+
+
+def place_external_order(conn, source, external_id, lines, label=None, note=None):
+    """建立外部平台（Uber Eats）訂單，直接進廚房。
+
+    lines = [{"external_item_id", "name", "qty", "note"}]。同一張外部訂單重複送來不會重複建單。
+    廚房暫停接單時丟出 KitchenPaused（呼叫端應拒絕該單）。
+    回傳 {"order_id", "duplicate", "unmatched": [品名…]}。
+    """
+    if not external_id:
+        raise OpsError("缺少外部訂單編號")
+    if not lines:
+        raise OpsError("外部訂單沒有品項")
+    dup = conn.execute("SELECT id FROM meal_order WHERE source=? AND external_id=?",
+                       (source, external_id)).fetchone()
+    if dup:
+        return {"order_id": dup["id"], "duplicate": True, "unmatched": []}
+    ks = kitchen_status(conn)
+    if not ks["accepting"]:
+        raise KitchenPaused("廚房目前暫停接單" + (f"：{ks['reason']}" if ks["reason"] else ""))
+    unmatched = []
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO meal_order(order_type,note,source,external_id,external_label) VALUES (?,?,?,?,?)",
+            ("takeout", (note or "").strip() or None, source, external_id, (label or "").strip() or None))
+        order_id = cur.lastrowid
+        for ln in lines:
+            qty = 1 if ln.get("qty") is None else int(ln["qty"])   # 沒填 = 1；明確填 0 或負數要擋下
+            if qty <= 0:
+                raise OpsError("數量需大於 0")
+            item, placeholder = _map_external_item(conn, source, ln)
+            lnote = (ln.get("note") or "").strip()
+            if placeholder:
+                unmatched.append(ln.get("name") or item["name"])
+                lnote = (lnote + "；" if lnote else "") + "未對應菜單，請核對品項與價格"
+            conn.execute(
+                "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note) VALUES (?,?,?,?,?,?)",
+                (order_id, 1, item["id"], qty, item["price"], lnote or None))
+    return {"order_id": order_id, "duplicate": False, "unmatched": unmatched}
+
+
+def cancel_external_order(conn, source, external_id):
+    """平台通知取消。還沒開始製作 → 直接取消；已開始 → 保留並在整單備註加上醒目警告，交給人處理。
+    回傳 "cancelled" / "flagged" / "unknown" / "closed"。"""
+    row = conn.execute("SELECT * FROM meal_order WHERE source=? AND external_id=?", (source, external_id)).fetchone()
+    if not row:
+        return "unknown"
+    if row["status"] != "open":
+        return "closed"
+    try:
+        cancel_order(conn, row["id"])
+        return "cancelled"
+    except OpsError:
+        with conn:
+            warn = "⚠️ 平台已取消此單，請與廚房確認是否停止製作"
+            conn.execute("UPDATE meal_order SET note=? WHERE id=?",
+                         (f"{warn}；{row['note']}" if row["note"] else warn, row["id"]))
+        return "flagged"
+
+
+def record_external_event(conn, source, external_id, event_type, status, note=None, payload=None):
+    with conn:
+        conn.execute("INSERT INTO external_event(source,external_id,event_type,status,note,payload) VALUES (?,?,?,?,?,?)",
+                     (source, external_id, event_type, status, note, payload))
+
+
+def external_alerts(conn, source="uber", hours=3):
+    """最近處理失敗的外部訂單數（外場頁用來提醒人工處理）。"""
+    return conn.execute(
+        "SELECT COUNT(*) FROM external_event WHERE source=? AND status='failed' "
+        "AND received_at >= datetime('now','localtime',?)", (source, f"-{int(hours)} hours")).fetchone()[0]
+
+
+def order_source(conn, order_id):
+    row = conn.execute("SELECT source, external_id FROM meal_order WHERE id=?", (order_id,)).fetchone()
+    return (row["source"], row["external_id"]) if row else (None, None)
