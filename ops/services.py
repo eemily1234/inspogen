@@ -9,6 +9,7 @@ from datetime import date, timedelta
 
 OWNER = "owner"
 STAFF = "staff"
+KITCHEN = "kitchen"   # 廚房帳號：資料庫存為 staff + kitchen=1
 
 
 class OpsError(ValueError):
@@ -28,7 +29,7 @@ def create_user(conn, name, role, pin):
     name = (name or "").strip()
     if not name:
         raise OpsError("請輸入姓名")
-    if role not in (OWNER, STAFF):
+    if role not in (OWNER, STAFF, KITCHEN):
         raise OpsError("角色錯誤")
     if not (pin or "").isdigit() or len(pin) < 4:
         raise OpsError("PIN 需為至少 4 位數字")
@@ -38,8 +39,9 @@ def create_user(conn, name, role, pin):
     try:
         with conn:
             cur = conn.execute(
-                "INSERT INTO user(name, role, salt, pin_hash) VALUES (?,?,?,?)",
-                (name, role, salt, _hash(pin, salt)),
+                "INSERT INTO user(name, role, kitchen, salt, pin_hash) VALUES (?,?,?,?,?)",
+                (name, STAFF if role == KITCHEN else role, 1 if role == KITCHEN else 0,
+                 salt, _hash(pin, salt)),
             )
     except Exception as e:  # UNIQUE 衝突
         raise OpsError("姓名已存在") from e
@@ -55,10 +57,26 @@ def authenticate(conn, name, pin):
     return None
 
 
+def is_kitchen(user):
+    return bool(user.get("kitchen"))
+
+
 def can(user, action):
-    """權限：店員可 POS 與看庫存（不含成本）；老闆全部。"""
+    """權限：店員可 POS 與看庫存（不含成本）；老闆全部；廚房帳號什麼後台功能都沒有。"""
+    if is_kitchen(user):
+        return False
     staff_ok = {"pos", "view_stock"}
     return user["role"] == OWNER or action in staff_ok
+
+
+def meal_pages(user):
+    """餐點系統各角色能進的頁面（依序，第一個是預設首頁）。
+    老闆：全部；店員：外場、點餐、廚房、結帳；廚房帳號：只有點餐與廚房。"""
+    if is_kitchen(user):
+        return ["kitchen", "order"]
+    if user["role"] == OWNER:
+        return ["floor", "order", "kitchen", "orders", "settings"]
+    return ["floor", "order", "kitchen", "orders"]
 
 
 # ───────────────────────── 品項 ─────────────────────────

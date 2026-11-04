@@ -131,6 +131,8 @@ def flow_strip(flow):
 
 def table_grid(tables, on_pick, selected=None, cols=3, key="t"):
     """桌位格子（可點）。on_pick(name) 在點擊時呼叫。"""
+    if len(tables) == 4:   # 每層 4 桌：排成 2×2，比 3＋1 整齊也更好點
+        cols = 2
     for i in range(0, len(tables), cols):
         row = st.columns(cols)
         for col, t in zip(row, tables[i:i + cols]):
@@ -171,8 +173,8 @@ def _floor_board():
         if not ov["tables"]:
             st.info("還沒有設定桌位。")
             if s.can(user, "report"):
-                f1 = st.number_input("1 樓桌數", 0, 99, 6)
-                f2 = st.number_input("2 樓桌數", 0, 99, 6)
+                f1 = st.number_input("1 樓桌數", 0, 99, orders.DEFAULT_FLOORS[1])
+                f2 = st.number_input("2 樓桌數", 0, 99, orders.DEFAULT_FLOORS[2])
                 if st.button("建立桌位（每桌 4 人）", type="primary", use_container_width=True):
                     try:
                         orders.setup_tables(c, {1: f1, 2: f2}, seats=4)
@@ -414,6 +416,8 @@ def _kitchen_board():
 def kitchen_page():
     top_bar()
     st.header("👨‍🍳 廚房")
+    if msg := st.session_state.pop("last_order", None):
+        st.success(msg)
     _kitchen_board()
 
 
@@ -518,9 +522,9 @@ def settings_page():
         tables = orders.list_tables(conn)
         cur = {f: sum(1 for t in tables if t["floor"] == f) for f in (1, 2)}
         st.caption("每層桌子的數量。桌號自動編為 101、102…（1 樓）、201、202…（2 樓），每桌 4 人。")
-        n1 = st.number_input("1 樓桌數", 0, 99, cur[1] or 6)
-        n2 = st.number_input("2 樓桌數", 0, 99, cur[2] or 6)
-        seats = st.number_input("每桌座位數", 1, 20, tables[0]["seats"] if tables else 4)
+        n1 = st.number_input("1 樓桌數", 0, 99, cur[1] if tables else orders.DEFAULT_FLOORS[1])
+        n2 = st.number_input("2 樓桌數", 0, 99, cur[2] if tables else orders.DEFAULT_FLOORS[2])
+        seats = st.number_input("每桌座位數", 1, 20, tables[0]["seats"] if tables else orders.DEFAULT_SEATS)
         if st.button("儲存桌位", type="primary", use_container_width=True):
             try:
                 n = orders.setup_tables(conn, {1: n1, 2: n2}, seats=seats)
@@ -556,14 +560,16 @@ if "user" not in st.session_state:
     login_view(conn, "🍽️ 餐點點餐系統")
 else:
     user = st.session_state.user
-    PAGES = {
-        "floor": st.Page(floor_page, title="外場", icon="🗺️", url_path="floor", default=True),
-        "order": st.Page(order_page, title="點餐", icon="🍽️", url_path="order"),
-        "kitchen": st.Page(kitchen_page, title="廚房", icon="👨‍🍳", url_path="kitchen"),
-        "orders": st.Page(orders_page, title="結帳", icon="🧾", url_path="orders"),
+    orders.ensure_default_tables(conn)   # 第一次使用：1 樓 4 桌、2 樓 4 桌，每桌 4 人
+    # 依帳號角色只註冊能進的頁面：廚房帳號只有「廚房、點餐」，網址手動輸入其他頁也進不去
+    ALL_PAGES = {
+        "floor": (floor_page, "外場", "🗺️"), "order": (order_page, "點餐", "🍽️"),
+        "kitchen": (kitchen_page, "廚房", "👨‍🍳"), "orders": (orders_page, "結帳", "🧾"),
+        "settings": (settings_page, "設定", "⚙️"),
     }
-    if s.can(user, "report"):
-        PAGES["settings"] = st.Page(settings_page, title="設定", icon="⚙️", url_path="settings")
+    allowed = s.meal_pages(user)
+    PAGES = {k: st.Page(ALL_PAGES[k][0], title=ALL_PAGES[k][1], icon=ALL_PAGES[k][2],
+                        url_path=k, default=(i == 0)) for i, k in enumerate(allowed)}
     try:   # 新版 Streamlit：隱藏預設導覽，改用每頁頂端的大按鈕列（手機、平板更好點）
         nav = st.navigation(list(PAGES.values()), position="hidden")
         USE_TOPBAR = True
@@ -571,7 +577,7 @@ else:
         nav = st.navigation(list(PAGES.values()))
         USE_TOPBAR = False
     target = st.session_state.pop("go_to", None)
-    if target in PAGES:
-        st.switch_page(PAGES[target])
+    if target:   # 目標頁不在權限內（例如廚房帳號送單後想回外場）就回到自己的首頁
+        st.switch_page(PAGES.get(target) or PAGES[allowed[0]])
     nav.run()
     sidebar_user(user)

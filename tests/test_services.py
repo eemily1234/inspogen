@@ -128,3 +128,39 @@ def test_report_gross_profit(conn, goods):
     assert r["cogs"] == 800
     assert r["gross_profit"] == 1350
     assert r["net"] == 2150 - 4000 - 500
+
+
+def test_kitchen_account_is_locked_to_meal_pages(conn):
+    s.create_user(conn, "廚房", s.KITCHEN, "2222")
+    k = s.authenticate(conn, "廚房", "2222")
+    assert k["role"] == s.STAFF and k["kitchen"] == 1 and s.is_kitchen(k)
+    assert s.meal_pages(k) == ["kitchen", "order"]
+    for action in ("pos", "view_stock", "report", "void", "view_cost"):
+        assert not s.can(k, action)
+    staff = s.create_user(conn, "小明", s.STAFF, "1111") and s.authenticate(conn, "小明", "1111")
+    assert s.meal_pages(staff) == ["floor", "order", "kitchen", "orders"]
+    assert s.can(staff, "pos") and not s.is_kitchen(staff)
+    assert s.meal_pages({"role": s.OWNER}) == ["floor", "order", "kitchen", "orders", "settings"]
+
+
+def test_kitchen_account_counts_toward_four_user_limit(conn):
+    for name, role in (("老闆", s.OWNER), ("服務生", s.STAFF), ("廚房", s.KITCHEN), ("店員2", s.STAFF)):
+        s.create_user(conn, name, role, "1234")
+    with pytest.raises(s.OpsError):
+        s.create_user(conn, "第五人", s.STAFF, "1234")
+
+
+def test_old_user_table_gets_kitchen_column(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.db")
+    raw = sqlite3.connect(path)
+    raw.executescript("""CREATE TABLE user (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+        role TEXT NOT NULL CHECK (role IN ('owner','staff')), salt TEXT NOT NULL, pin_hash TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1);
+        INSERT INTO user(name, role, salt, pin_hash) VALUES ('老闆','owner','x','y');""")
+    raw.commit(); raw.close()
+    c = db.connect(path)
+    assert "kitchen" in {r["name"] for r in c.execute("PRAGMA table_info(user)")}
+    assert c.execute("SELECT kitchen FROM user").fetchone()[0] == 0          # 舊帳號不受影響
+    s.create_user(c, "廚房", s.KITCHEN, "2222")
+    assert s.authenticate(c, "廚房", "2222")["kitchen"] == 1

@@ -387,3 +387,13 @@ def test_legacy_order_on_unconfigured_table_still_visible(conn):
     o.setup_tables(conn, {1: 2})
     ov = o.floor_overview(conn)
     assert [t["name"] for t in ov["tables"] if t["floor"] == 0] == ["A3"]
+
+
+def test_ensure_default_tables_once(conn):
+    assert o.ensure_default_tables(conn) is True
+    ts = o.list_tables(conn)
+    assert [t["name"] for t in ts] == ["101", "102", "103", "104", "201", "202", "203", "204"]
+    assert all(t["seats"] == 4 for t in ts)
+    assert o.ensure_default_tables(conn) is False
+    o.setup_tables(conn, {1: 0, 2: 0})
+    assert o.ensure_default_tables(conn) is False and o.list_tables(conn) == []   # 不會又被自動建回來

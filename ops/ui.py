@@ -8,6 +8,8 @@ PAY = ["現金", "轉帳", "行動支付", "信用卡"]
 
 
 def role_label(user):
+    if s.is_kitchen(user):
+        return "廚房"
     return "老闆" if user["role"] == s.OWNER else "店員"
 
 

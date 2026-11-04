@@ -452,3 +452,20 @@ def serve_all_ready(conn, order_id):
         if cur.rowcount == 0:
             raise OpsError("目前沒有可上的菜")
         return cur.rowcount
+
+
+DEFAULT_FLOORS = {1: 4, 2: 4}   # 每樓 4 桌
+DEFAULT_SEATS = 4               # 每桌 4 人
+
+
+def ensure_default_tables(conn):
+    """第一次使用時自動建立桌位：1 樓 101～104、2 樓 201～204，每桌 4 人。
+    只會做一次；之後老闆在設定頁改成別的（甚至全部刪除）都不會被覆蓋。"""
+    if _setting(conn, "tables_initialized") == "1":
+        return False
+    with conn:
+        _set_setting(conn, "tables_initialized", "1")
+    if conn.execute("SELECT 1 FROM dining_table LIMIT 1").fetchone():
+        return False
+    setup_tables(conn, DEFAULT_FLOORS, seats=DEFAULT_SEATS)
+    return True

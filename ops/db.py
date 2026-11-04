@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS user (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     role TEXT NOT NULL CHECK (role IN ('owner','staff')),
+    kitchen INTEGER NOT NULL DEFAULT 0,   -- 1 = 廚房帳號（role 為 staff，但只能用點餐與廚房頁）
     salt TEXT NOT NULL,
     pin_hash TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1
@@ -158,6 +159,7 @@ CREATE TABLE IF NOT EXISTS line_event (
 
 # 舊資料庫升級：CREATE TABLE IF NOT EXISTS 不會替既有資料表補欄位，這裡逐一補上
 MIGRATIONS = [
+    ("user", "kitchen", "INTEGER NOT NULL DEFAULT 0"),
     ("meal_order", "merged_into", "INTEGER"),
     ("meal_order", "guests", "INTEGER"),
     ("order_line", "paid_qty", "INTEGER NOT NULL DEFAULT 0"),

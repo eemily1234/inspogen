@@ -218,8 +218,9 @@ def ledger_page():
 # ───────────────────────── 使用者（老闆） ─────────────────────────
 def users_page():
     st.header("👥 使用者（最多 4 人）")
-    for u in conn.execute("SELECT name, role FROM user WHERE active=1"):
-        st.write(f"{u['name']}　{'老闆' if u['role'] == s.OWNER else '店員'}")
+    for u in conn.execute("SELECT name, role, kitchen FROM user WHERE active=1"):
+        label = "廚房（僅點餐、廚房頁）" if u["kitchen"] else ("老闆" if u["role"] == s.OWNER else "店員")
+        st.write(f"{u['name']}　{label}")
     st.subheader("Line 記帳綁定")
     if st.button("產生 Line 綁定碼", use_container_width=True):
         try:
@@ -235,7 +236,8 @@ def users_page():
     st.subheader("新增使用者")
     with st.form("newuser", clear_on_submit=True):
         name = st.text_input("姓名")
-        role = st.selectbox("角色", [s.STAFF, s.OWNER], format_func=lambda r: "店員" if r == s.STAFF else "老闆")
+        role = st.selectbox("角色", [s.STAFF, s.KITCHEN, s.OWNER],
+                            format_func={s.STAFF: "店員", s.KITCHEN: "廚房（只能用點餐、廚房頁）", s.OWNER: "老闆"}.get)
         pin = st.text_input("PIN（至少 4 位數字）", type="password")
         if st.form_submit_button("新增使用者", use_container_width=True):
             try:
@@ -250,6 +252,10 @@ if "user" not in st.session_state:
     login_view(conn, "🧾 營運後台")
 else:
     user = st.session_state.user
+    if s.is_kitchen(user):   # 廚房帳號只能使用餐點系統（點餐、廚房）
+        st.error("🔒 這個帳號只能使用「餐點點餐系統」（點餐、廚房），不能進入營運後台。")
+        sidebar_user(user)
+        st.stop()
     pages = [st.Page(pos_page, title="POS（商品）", icon="🛒", url_path="pos"),
              st.Page(stock_page, title="庫存", icon="📦", url_path="stock")]
     if s.can(user, "report"):
