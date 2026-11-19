@@ -6,7 +6,7 @@ from datetime import date, timedelta
 import streamlit as st
 
 from ops import db, linebot, services as s
-from ops.ui import CAT, PAY, login_view, sidebar_user
+from ops.ui import CAT, PAY, invoice_inputs, invoice_message, login_view, sidebar_user
 
 st.set_page_config(page_title="營運系統", page_icon="🧾", layout="centered")
 
@@ -53,12 +53,15 @@ def pos_page():
     if cart:
         st.markdown(f"### 合計　${total}")
         pay = st.radio("付款方式", PAY, horizontal=True)
+        inv, inv_err = invoice_inputs(conn, "pos", pay)
+        if inv_err:
+            st.warning(inv_err)
         c1, c2 = st.columns(2)
-        if c1.button("✅ 結帳", type="primary", use_container_width=True):
+        if c1.button("✅ 結帳", type="primary", use_container_width=True, disabled=bool(inv_err)):
             try:
-                sid = s.sell(conn, list(cart.items()), pay, user["id"])
+                sid = s.sell(conn, list(cart.items()), pay, user["id"], invoice=inv)
                 st.session_state.cart = {}
-                st.session_state.last_sale = f"已結帳，單號 #{sid}，合計 ${total}"
+                st.session_state.last_sale = f"已結帳，單號 #{sid}，合計 ${total}" + invoice_message(conn, sid)
                 st.rerun()
             except s.OpsError as e:
                 st.error(str(e))
@@ -72,11 +75,14 @@ def pos_page():
         with st.expander("最近銷貨 / 作廢"):
             for r in s.recent_sales(conn, 10):
                 c1, c2 = st.columns([4, 1])
-                c1.write(f"#{r['id']}　{r['created_at']}　${r['total']}　{r['pay_method']}　"
+                c1.write(f"#{r['id']}　{r['created_at']}　${r['total']}　{r['pay_method']}　{r['invoice_no'] or ''}　"
                          + ("🚫作廢" if r["status"] == "void" else ""))
                 if r["status"] == "done" and c2.button("作廢", key=f"v{r['id']}"):
-                    s.void_sale(conn, r["id"], user["id"])
-                    st.rerun()
+                    try:
+                        s.void_sale(conn, r["id"], user["id"])
+                        st.rerun()
+                    except s.OpsError as e:
+                        st.error(str(e))
 
 
 # ───────────────────────── 庫存 ─────────────────────────

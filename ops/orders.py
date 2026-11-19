@@ -345,16 +345,21 @@ def close_order(conn, order_id):
                      (status, order_id))
 
 
-def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=None, discount=0, note=None):
+def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=None, discount=0, note=None,
+                   invoice=None):
     """結帳指定品項（分開結帳）。selections = [(line_id, 份數), ...]。
     discount：這次結帳折抵的金額（0～小計）；note：優惠備註。實收＝小計－折扣。
 
     同一交易內：寫 sale / sale_line / 收入分錄、累加各品項已付份數。
     結清不會結束訂單；客人離開時再按完成 (close_order)。回傳 sale_id。
+    invoice：電子發票買受人資料 {kind, value}（啟用電子發票時，同一筆交易開立）。
     """
+    from . import einvoice
+    buyer = einvoice.normalize_buyer(invoice)
     discount = int(discount or 0)
     note = (note or "").strip() or None
-    today = (today or date.today()).isoformat()
+    day = today or date.today()
+    today = day.isoformat()
     picks = {}
     for line_id, qty in selections:
         qty = int(qty)
@@ -384,6 +389,8 @@ def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=N
         cur = conn.execute("INSERT INTO sale(total,pay_method,created_by,discount,note) VALUES (?,?,?,?,?)",
                            (total - discount, pay_method, user_id, discount, note))
         sale_id = cur.lastrowid
+        if einvoice.should_issue(conn, pay_method, total - discount):
+            einvoice.issue_in_tx(conn, sale_id, total - discount, buyer, day)
         for l, qty in rows:
             conn.execute(
                 "INSERT INTO sale_line(sale_id,item_id,qty,unit_price,unit_cost) VALUES (?,?,?,?,?)",
@@ -409,7 +416,7 @@ def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=N
     return sale_id
 
 
-def checkout_order(conn, order_id, pay_method, user_id=None, today=None, discount=0, note=None):
+def checkout_order(conn, order_id, pay_method, user_id=None, today=None, discount=0, note=None, invoice=None):
     """結清這張訂單所有尚未結帳的品項（可加折扣與優惠備註）。"""
     rows = conn.execute(
         "SELECT id, qty-paid_qty AS rest FROM order_line "
@@ -417,7 +424,7 @@ def checkout_order(conn, order_id, pay_method, user_id=None, today=None, discoun
     if not rows:
         raise OpsError("沒有可結帳的品項")
     return checkout_lines(conn, order_id, [(r["id"], r["rest"]) for r in rows], pay_method, user_id, today,
-                          discount, note)
+                          discount, note, invoice)
 
 
 def split_evenly(amount, people):

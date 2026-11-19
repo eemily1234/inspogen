@@ -351,7 +351,7 @@ def adjust_stock(conn, item_id, qty_delta, reason, batch_no=None, expiry=None,
 
 
 # ───────────────────────── 銷貨（錢貨一起） ─────────────────────────
-def sell(conn, lines, pay_method, user_id=None, today=None):
+def sell(conn, lines, pay_method, user_id=None, today=None, invoice=None):
     """POS 結帳。lines = [(item_id, qty), ...]。
 
     同一交易內：寫 sale/sale_line、收入分錄、庫存異動（商品依效期最近者先出）。
@@ -364,7 +364,10 @@ def sell(conn, lines, pay_method, user_id=None, today=None):
         if qty <= 0:
             raise OpsError("數量需大於 0")
         merged[item_id] = merged.get(item_id, 0) + qty
-    today = (today or date.today()).isoformat()
+    from . import einvoice
+    buyer = einvoice.normalize_buyer(invoice)
+    day = today or date.today()
+    today = day.isoformat()
 
     with conn:  # 單一交易
         items = {i: get_item(conn, i) for i in merged}
@@ -377,6 +380,8 @@ def sell(conn, lines, pay_method, user_id=None, today=None):
             (total, pay_method, user_id),
         )
         sale_id = cur.lastrowid
+        if einvoice.should_issue(conn, pay_method, total):
+            einvoice.issue_in_tx(conn, sale_id, total, buyer, day)
         for i, q in merged.items():
             it = items[i]
             conn.execute(
@@ -406,8 +411,10 @@ def sell(conn, lines, pay_method, user_id=None, today=None):
 
 
 def void_sale(conn, sale_id, user_id=None, today=None):
-    """作廢：不刪除，產生反向庫存（回到原批次）與反向收入分錄。"""
-    today = (today or date.today()).isoformat()
+    """作廢：不刪除，產生反向庫存（回到原批次）與反向收入分錄；有電子發票時一併作廢（同期內）。"""
+    from . import einvoice
+    day = today or date.today()
+    today = day.isoformat()
     with conn:
         sale = conn.execute("SELECT * FROM sale WHERE id=?", (sale_id,)).fetchone()
         if not sale:
@@ -423,6 +430,7 @@ def void_sale(conn, sale_id, user_id=None, today=None):
                     "SELECT 1 FROM meal_order WHERE status='open' AND order_type='dine_in' "
                     "AND table_no=? AND id!=?", (o["table_no"], o["id"])).fetchone():
                 raise OpsError(f"桌 {o['table_no']} 已有新的未結帳訂單，請先結帳後再作廢這一筆")
+        einvoice.void_in_tx(conn, sale_id, day)
         conn.execute("UPDATE sale SET status='void' WHERE id=?", (sale_id,))
         for p in conn.execute("SELECT * FROM order_payment_line WHERE sale_id=?", (sale_id,)).fetchall():
             conn.execute("UPDATE order_line SET paid_qty=MAX(0, paid_qty-?) WHERE id=?",

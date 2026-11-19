@@ -355,3 +355,30 @@ def test_settings_lives_in_the_sidebar_for_owner_only(seeded):
     assert any("⚙️ 設定" in m.value for m in at.sidebar.markdown)
     staff = run("staff")
     assert not staff.exception and not any("⚙️ 設定" in m.value for m in staff.sidebar.markdown)
+
+
+def test_checkout_with_tax_id_issues_invoice(seeded):
+    from datetime import date
+    from ops import einvoice as ei
+    ei.set_enabled(seeded, True)
+    ei.add_track(seeded, ei.period_of(date.today()), "AB", 100, 149)
+    at = run()
+    press(at, "tbl_", "_101").click().run()
+    od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
+    at.pills(key=f"inv_kind_{od['id']}").set_value("ban").run()
+    at.text_input(key=f"inv_val_{od['id']}_ban").input("12345678").run()
+    assert any("統一編號不正確" in w.value for w in at.warning)
+    assert press(at, f"payall{od['id']}").disabled                            # 統編錯就不能結帳
+    at.text_input(key=f"inv_val_{od['id']}_ban").input("04595257").run()
+    press(at, f"payall{od['id']}").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    inv = ei.list_invoices(seeded)[0]
+    assert inv["number"] == "AB00000100" and inv["buyer_ban"] == "04595257" and inv["amount"] == 300
+
+
+def test_einvoice_settings_page_renders(seeded):
+    from ops import einvoice as ei
+    ei.set_enabled(seeded, True)
+    at = _page("settings_page")
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("剩 0 個號碼" in e.value for e in at.error)

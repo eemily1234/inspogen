@@ -81,6 +81,47 @@ CREATE TABLE IF NOT EXISTS sale (
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS invoice_track (   -- 電子發票字軌（財政部配給的號碼區間）
+    id INTEGER PRIMARY KEY,
+    period TEXT NOT NULL,          -- 民國年＋偶數月，例 11412
+    prefix TEXT NOT NULL,          -- 兩個英文字母
+    start_no INTEGER NOT NULL,
+    end_no INTEGER NOT NULL,
+    next_no INTEGER NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS invoice (
+    id INTEGER PRIMARY KEY,
+    sale_id INTEGER NOT NULL UNIQUE REFERENCES sale(id),
+    number TEXT NOT NULL UNIQUE,
+    period TEXT NOT NULL,
+    issued_on TEXT NOT NULL,
+    amount INTEGER NOT NULL,       -- 含稅總額
+    sales_amount INTEGER NOT NULL, -- 未稅
+    tax INTEGER NOT NULL,
+    buyer_ban TEXT,                -- 統一編號
+    carrier_type TEXT,             -- mobile / cdc
+    carrier_id TEXT,
+    donate_code TEXT,
+    random_code TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'issued' CHECK (status IN ('issued','void')),
+    void_reason TEXT,
+    voided_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+
+CREATE TABLE IF NOT EXISTS invoice_event (   -- 待上傳加值中心的佇列
+    id INTEGER PRIMARY KEY,
+    invoice_id INTEGER NOT NULL REFERENCES invoice(id),
+    kind TEXT NOT NULL CHECK (kind IN ('issue','void')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    sent_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS sale_line (
     id INTEGER PRIMARY KEY,
     sale_id INTEGER NOT NULL REFERENCES sale(id),

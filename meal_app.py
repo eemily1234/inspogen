@@ -15,8 +15,8 @@ from uuid import uuid4
 import streamlit as st
 import streamlit.components.v1 as components
 
-from ops import db, orders, services as s, uber
-from ops.ui import PAY, login_view, sidebar_user
+from ops import db, einvoice as ei, orders, services as s, uber
+from ops.ui import PAY, invoice_inputs, invoice_message, login_view, sidebar_user
 
 st.set_page_config(page_title="餐點點餐系統", page_icon="🍽️", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -86,6 +86,7 @@ button[data-baseweb="tab"]{min-height:3rem;font-size:1.15rem;padding:0 1.1rem}
 .qempty{opacity:.5;padding:.2rem}
 .tc-paid{color:#2e9e5b;font-weight:700}
 /* DJ 打碟墊式點餐鍵：方形、厚實、按下會沉下去；顏色＝廚房（橘紅）、吧台（藍）、套餐（紫） */
+[class*="st-key-inv_kind_"] button{min-height:48px;font-size:1.02rem;padding:6px 16px}
 [class*="st-key-padk_"] button,[class*="st-key-padb_"] button,[class*="st-key-padc_"] button{
  aspect-ratio:1/1;min-height:5.6rem;max-height:9.5rem;border-radius:18px;border:0;color:#fff;font-weight:800;
  box-shadow:inset 0 -6px 0 rgba(0,0,0,.25),0 4px 10px rgba(0,0,0,.18);transition:transform .06s,box-shadow .06s}
@@ -793,25 +794,31 @@ def checkout_section(od):
     dnote = st.text_input("優惠備註／贈品說明", key=f"dnote_{oid}", placeholder="例：生日 9 折、熟客優惠、招待甜點")
     st.markdown("**付款方式**")
     pay = choice_buttons(f"pay_{oid}", PAY, cols=2)
+    inv, inv_err = invoice_inputs(conn, oid, pay)
+    if inv_err:
+        st.warning(inv_err)
 
     def pay_button(label_prefix, subtotal, key, do):
         disc = orders.discount_amount(subtotal, preset, amount) if subtotal else 0
         due = subtotal - disc
         detail = f"　（小計 ＄{subtotal} − 折扣 ＄{disc}）" if disc else ""
         if st.button(f"{label_prefix}　＄{due}{detail}", key=key, use_container_width=True,
-                     type="primary" if key.startswith("payall") else "secondary", disabled=subtotal <= 0):
+                     type="primary" if key.startswith("payall") else "secondary",
+                     disabled=subtotal <= 0 or bool(inv_err)):
             try:
                 sid = do(disc)
                 extra = (f"，折扣 ＄{disc}" if disc else "") + (f"（{dnote.strip()}）" if dnote.strip() else "")
+                extra += invoice_message(conn, sid)
                 st.session_state["last_order"] = f"已收 ＄{due}：{od['where']}（單號 #{sid}）{extra}"
                 st.rerun()
             except s.OpsError as e:
                 st.error(str(e))
 
     pay_button("💵 全部結清", od["unpaid_total"], f"payall{oid}",
-               lambda d: orders.checkout_order(conn, oid, pay, user["id"], discount=d, note=dnote))
+               lambda d: orders.checkout_order(conn, oid, pay, user["id"], discount=d, note=dnote, invoice=inv))
     pay_button("💵 只結上面選的份數", pick_total, f"paysome{oid}",
-               lambda d: orders.checkout_lines(conn, oid, picks, pay, user["id"], discount=d, note=dnote))
+               lambda d: orders.checkout_lines(conn, oid, picks, pay, user["id"], discount=d, note=dnote,
+                                              invoice=inv))
     with st.expander("🧮 均分試算（只算金額，不入帳）"):
         n = stepper(f"split_n_{oid}", 1, 30, 2)
         st.write("　".join(f"第{i + 1}位 ＄{v}" for i, v in enumerate(orders.split_evenly(od["unpaid_total"], n))))
@@ -1417,10 +1424,55 @@ def report_page():
 
 
 # ───────────────────────── 設定（老闆）：桌位、菜單、套餐、熟客 ─────────────────────────
+def einvoice_settings():
+    """電子發票：啟用、登記字軌（號碼區間）、看今天開了哪些、上傳佇列。"""
+    on = st.toggle("啟用電子發票（結帳時開立）", value=ei.enabled(conn), key="ei_on")
+    if on != ei.enabled(conn):
+        ei.set_enabled(conn, on)
+        st.rerun()
+    st.caption("Uber Eats 的單由平台開發票，這裡不重複開。作廢銷貨會一併作廢發票（只能同一期；跨期要開折讓單）。")
+    period = ei.period_of(date.today())
+    left = ei.remaining(conn)
+    (st.error if left == 0 else st.warning if left <= 20 else st.success)(
+        f"本期（{ei.period_label(period)}）剩 {left} 個號碼")
+    with st.expander("➕ 登記字軌（加值中心或財政部給的號碼區間）", expanded=left == 0):
+        with st.form("ei_track", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            p = c1.text_input("期別", value=period, help="民國年＋偶數月，例 11412 是 114 年 11–12 月")
+            pre = c2.text_input("字軌（2 個英文字母）", max_chars=2)
+            c3, c4 = st.columns(2)
+            a = c3.number_input("起號", 0, 99999999, 0, format="%08d")
+            b = c4.number_input("迄號", 0, 99999999, 49, format="%08d")
+            if st.form_submit_button("登記", use_container_width=True):
+                try:
+                    ei.add_track(conn, p, pre, a, b)
+                    st.success("已登記")
+                    st.rerun()
+                except s.OpsError as e:
+                    st.error(str(e))
+    for t in ei.list_tracks(conn)[:12]:
+        st.caption(f"{ei.period_label(t['period'])}　{t['prefix']}{t['start_no']:08d}～{t['prefix']}{t['end_no']:08d}"
+                   f"　下一張 {t['prefix']}{min(t['next_no'], t['end_no']):08d}　剩 {max(t['remaining'], 0)} 張")
+    q = ei.queue_counts(conn)
+    st.markdown("**上傳狀態**")
+    st.info(f"待上傳 {q['pending']}　失敗待重送 {q['failed']}　已上傳 {q['sent']}  \n"
+            "加值中心還沒接上：發票號碼照常開，資料先存在這裡，接上後會依序補傳。"
+            "法規規定開立後 48 小時內要上傳，正式使用前請先完成串接。")
+    st.markdown("**今天開的發票**")
+    rows = ei.list_invoices(conn)
+    if not rows:
+        st.caption("今天還沒有")
+    for r in rows:
+        st.caption(f"{'🚫 ' if r['status'] == 'void' else ''}{r['number']}　＄{r['amount']}　{ei.describe_buyer(r)}"
+                   f"　隨機碼 {r['random_code']}　{r['created_at'][11:16]}")
+
+
 def settings_page():
     top_bar()
     st.header("⚙️ 設定")
-    t1, t2, t3 = st.tabs(["桌位", "菜單・套餐", "熟客名單"])
+    t1, t2, t3, t4 = st.tabs(["桌位", "菜單・套餐", "熟客名單", "🧾 電子發票"])
+    with t4:
+        einvoice_settings()
     with t1:
         tables = orders.list_tables(conn)
         cur = {f: sum(1 for t in tables if t["floor"] == f) for f in (1, 2)}
