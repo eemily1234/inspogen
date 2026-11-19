@@ -158,10 +158,11 @@ CREATE TABLE IF NOT EXISTS dining_table (
     name TEXT NOT NULL UNIQUE,   -- 例：101（1 樓第 1 桌）
     seats INTEGER NOT NULL DEFAULT 4
 );
--- 廚房呼叫外場：廚房按下呼叫 → 外場看到提示 → 外場按「收到」
+-- 廚房與外場互相呼叫：一方送出 → 另一方響鈴、跳出視窗 → 按「收到」
 CREATE TABLE IF NOT EXISTS kitchen_call (
     id INTEGER PRIMARY KEY,
     message TEXT NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'to_floor',   -- to_floor 廚房→外場；to_kitchen 外場→廚房
     table_no TEXT,               -- 跟哪一桌／哪張單有關（可空白）
     created_by INTEGER REFERENCES user(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
@@ -219,6 +220,7 @@ MIGRATIONS = [
     ("meal_order", "source", "TEXT NOT NULL DEFAULT 'pos'"),
     ("meal_order", "external_id", "TEXT"),
     ("meal_order", "external_label", "TEXT"),
+    ("kitchen_call", "direction", "TEXT NOT NULL DEFAULT 'to_floor'"),
     ("order_line", "paid_qty", "INTEGER NOT NULL DEFAULT 0"),
     ("order_line", "origin", "TEXT"),
 ]

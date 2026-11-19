@@ -425,6 +425,7 @@ def _tile(od, now=None):
         # 桌位圖上要畫出的餐點（含狀態），依下單順序
         "dishes": [{"name": l["name"], "qty": l["qty"], "status": l["status"], "note": l["note"]} for l in active],
         "note": od["note"],
+        "opened_at": od["created_at"],
     }
 
 
@@ -601,32 +602,40 @@ def prep_summary(conn):
 
 
 # ───────────────────────── 廚房呼叫外場 ─────────────────────────
-CALL_MESSAGES = ["請來取餐", "需要人手", "食材不足", "請確認訂單"]
+CALL_MESSAGES = ["請來取餐", "需要人手", "食材不足", "請確認訂單"]          # 廚房 → 外場
+KITCHEN_MESSAGES = ["請加快這桌", "客人有過敏，請注意", "客人要求取消", "請確認這桌的單"]   # 外場 → 廚房
 
 
-def call_floor(conn, message, table_no=None, user_id=None):
-    """廚房呼叫外場。回傳呼叫編號。"""
+def call_floor(conn, message, table_no=None, user_id=None, direction="to_floor"):
+    """呼叫另一邊：預設廚房呼叫外場；direction="to_kitchen" 為外場通知廚房。回傳呼叫編號。"""
+    if direction not in ("to_floor", "to_kitchen"):
+        raise OpsError("呼叫方向錯誤")
     message = (message or "").strip()
     if not message:
         raise OpsError("請選擇或輸入要通知外場的內容")
     if len(message) > 100:
         raise OpsError("內容請在 100 字以內")
     with conn:
-        cur = conn.execute("INSERT INTO kitchen_call(message,table_no,created_by) VALUES (?,?,?)",
-                           (message, (table_no or "").strip() or None, user_id))
+        cur = conn.execute("INSERT INTO kitchen_call(message,table_no,created_by,direction) VALUES (?,?,?,?)",
+                           (message, (table_no or "").strip() or None, user_id, direction))
     return cur.lastrowid
 
 
-def open_calls(conn):
-    """外場還沒回應的呼叫，舊的在前。"""
-    return [dict(r) for r in conn.execute(
-        "SELECT * FROM kitchen_call WHERE acked_at IS NULL ORDER BY id")]
+def call_kitchen(conn, message, table_no=None, user_id=None):
+    """外場通知廚房（廚房會響鈴、跳出視窗）。"""
+    return call_floor(conn, message, table_no, user_id, direction="to_kitchen")
 
 
-def recent_calls(conn, limit=5):
-    """廚房看自己最近的呼叫與外場是否已收到。"""
+def open_calls(conn, direction="to_floor"):
+    """還沒回應的呼叫（預設：給外場的），舊的在前。"""
     return [dict(r) for r in conn.execute(
-        "SELECT * FROM kitchen_call ORDER BY id DESC LIMIT ?", (limit,))]
+        "SELECT * FROM kitchen_call WHERE acked_at IS NULL AND direction=? ORDER BY id", (direction,))]
+
+
+def recent_calls(conn, limit=5, direction="to_floor"):
+    """最近送出的呼叫與對方是否已收到。"""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM kitchen_call WHERE direction=? ORDER BY id DESC LIMIT ?", (direction, limit))]
 
 
 def ack_call(conn, call_id, user_id=None):

@@ -40,7 +40,7 @@ def test_floor_page_renders_with_flow_and_tables(seeded, role):
     card101 = next(c for c in cards if "aria-label='桌 101'" in c)
     assert "待接單" in card101 and "2× 咖哩飯" in card101             # 桌子圖示上直接看到這桌的餐點
     labels = [b.label for b in at.button]
-    assert "點餐・查看" in labels and "🍽️ 開桌點餐" in labels
+    assert "點餐・結帳" in labels and "🍽️ 開桌點餐" in labels
     assert any("外帶" in m.value for m in at.markdown)
 
 
@@ -149,15 +149,46 @@ def test_selecting_a_table_opens_ordering_on_the_same_page(seeded):
     at = run()
     [b for b in at.button if b.key == "pick_102"][0].click().run()          # 102 是空桌
     assert not at.exception, [e.value for e in at.exception]
-    assert at.session_state["sel_table"] == "102"
-    assert any("開桌點餐" in h.value for h in at.subheader)
+    assert at.session_state["sel"] == {"kind": "table", "key": "102"}
+    assert any("桌 102" in m.value and "開桌點餐" in m.value for m in at.markdown)
     [b for b in at.button if b.key == "om_ocart_102_1"][0].click().run()   # 點咖哩飯
     [b for b in at.button if b.key == "send_ocart_102"][0].click().run()    # 送出
     assert not at.exception, [e.value for e in at.exception]
     od = next(x for x in o.open_orders(seeded) if x["table_no"] == "102")
     assert od["guests"] == 2 and [l["name"] for l in od["lines"]] == ["咖哩飯"]
-    assert at.session_state["sel_table"] == "102"                           # 留在外場同一桌
+    assert at.session_state["sel"] == {"kind": "table", "key": "102"}       # 留在外場同一桌
     assert any("已送出到廚房：桌 102" in m.value for m in at.success)
+
+
+def test_dashboard_handles_dishes_checkout_and_takeout_in_one_page(seeded):
+    at = run()
+    assert any("今日營收" in m.value and "未結帳" in m.value for m in at.markdown)   # 儀表板數字（老闆）
+    [b for b in at.button if b.key == "pick_101"][0].click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    md = " ".join(m.value for m in at.markdown)
+    assert "第 1 輪" in md and "🕒" in md                                      # 每輪都有時間
+    tabs = [t.label for t in at.tabs]
+    for name in ("🍽️ 餐點", "➕ 加點", "💵 結帳", "📣 通知廚房", "🔀 換桌／併桌"):
+        assert name in tabs
+    od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
+    [b for b in at.button if b.key == f"payall{od['id']}"][0].click().run()  # 同一頁直接結清
+    assert not at.exception, [e.value for e in at.exception]
+    assert not any(x["table_no"] == "101" for x in o.open_orders(seeded))
+    assert "sel" not in at.session_state
+    # 外帶：在接單分頁開新外帶單
+    [b for b in at.button if b.key == "new_takeout"][0].click().run()
+    [b for b in at.button if b.key == "om_ocart_takeout_2"][0].click().run()
+    [b for b in at.button if b.key == "send_ocart_takeout"][0].click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert at.session_state["sel"]["kind"] == "order"                         # 送出後直接切到這張外帶單
+
+
+def test_floor_notifies_kitchen_from_the_dashboard(seeded):
+    at = run()
+    [b for b in at.button if b.key == "pick_101"][0].click().run()
+    od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
+    [b for b in at.button if b.key == f"nk{od['id']}_0"][0].click().run()
+    assert [(c["message"], c["table_no"]) for c in o.open_calls(seeded, "to_kitchen")] == [("請加快這桌", "桌 101")]
 
 
 def test_kitchen_shows_prep_summary_and_can_call_floor(seeded):

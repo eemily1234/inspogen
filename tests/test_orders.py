@@ -443,3 +443,23 @@ def test_kitchen_calls_floor_and_floor_acknowledges(floors):
         o.call_floor(floors, "  ")
     with pytest.raises(s.OpsError):
         o.call_floor(floors, "x" * 101)
+
+
+def test_floor_can_notify_kitchen_separately_from_kitchen_calls(floors):
+    o.call_floor(floors, "請來取餐", "101")                                         # 廚房 → 外場
+    kid = o.call_kitchen(floors, "請加快這桌", "102", user_id=1)                     # 外場 → 廚房
+    assert [c["message"] for c in o.open_calls(floors)] == ["請來取餐"]
+    assert [(c["message"], c["table_no"]) for c in o.open_calls(floors, "to_kitchen")] == [("請加快這桌", "102")]
+    o.ack_call(floors, kid)
+    assert o.open_calls(floors, "to_kitchen") == []
+    assert o.recent_calls(floors, direction="to_kitchen")[0]["acked_at"] is not None
+    with pytest.raises(s.OpsError):
+        o.call_floor(floors, "x", direction="sideways")
+
+
+def test_tables_and_orders_carry_open_time(floors):
+    o.place_order(floors, "dine_in", [L(1)], table_no="101")
+    t = next(x for x in o.floor_overview(floors)["tables"] if x["name"] == "101")
+    assert len(t["opened_at"]) == 19 and t["opened_at"][10] == " "                 # YYYY-MM-DD HH:MM:SS
+    line = o.open_orders(floors)[0]["lines"][0]
+    assert line["created_at"] and line["round_no"] == 1
