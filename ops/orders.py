@@ -143,7 +143,7 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
             if note:
                 merged = f"{order['note']}；{note}" if order["note"] else note
                 conn.execute("UPDATE meal_order SET note=? WHERE id=?", (merged, order_id))
-            if guests and not order["guests"]:
+            if guests and (not order["guests"] or guests > order["guests"]):   # 加點用到新座位 → 人數跟著增加
                 conn.execute("UPDATE meal_order SET guests=? WHERE id=?", (guests, order_id))
         for it, qty, lnote, seat, gift in clean:
             _insert_line(conn, order_id, round_no, it, qty, lnote, seat, gift)

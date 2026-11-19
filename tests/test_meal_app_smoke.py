@@ -31,18 +31,24 @@ def run(role="owner"):
     return at.run()
 
 
+def press(at, prefix, suffix=""):
+    """找到 key 以 prefix 開頭、suffix 結尾的按鈕（座位、桌子的 key 會帶著狀態）。"""
+    hits = [b for b in at.button if b.key and b.key.startswith(prefix) and b.key.endswith(suffix)]
+    assert hits, f"找不到按鈕 {prefix}…{suffix}"
+    return hits[0]
+
+
 @pytest.mark.parametrize("role", ["owner", "staff"])
 def test_floor_page_renders_with_flow_and_tables(seeded, role):
     at = run(role)
     assert not at.exception, [e.value for e in at.exception]
     text = " ".join(m.value for m in at.markdown)
-    assert "廚房接單中" in text and "待上菜" in text and "flow" in text
-    cards = [m.value for m in at.markdown if "tcard" in m.value]
-    card101 = next(c for c in cards if "aria-label='桌 101'" in c)
-    assert "待接單" in card101 and "2× 咖哩飯" in card101             # 桌子圖示上直接看到這桌的餐點
-    labels = [b.label for b in at.button]
-    assert "點餐・結帳" in labels and "🍽️ 開桌點餐" in labels
-    assert any("外帶" in m.value for m in at.markdown)
+    assert "廚房接單中" in text and "class='qboard'" in text
+    t101 = press(at, "tbl_new_off_", "_101")                                     # 桌子按鈕：顏色＝狀態
+    assert "101" in t101.label and "待接單" in t101.label
+    seats101 = [b for b in at.button if b.key and b.key.startswith("seat") and "_101_" in b.key]
+    assert len(seats101) == 4                                                    # 一邊兩人，四個座位都能點
+    assert press(at, "tbl_empty_off_", "_102")
 
 
 def test_kitchen_pause_is_shown_on_floor(seeded):
@@ -148,68 +154,85 @@ def test_uber_eats_is_a_payment_option():
 
 def test_selecting_a_table_opens_ordering_on_the_same_page(seeded):
     at = run()
-    [b for b in at.button if b.key == "pick_102"][0].click().run()          # 102 是空桌
+    press(at, "tbl_empty_", "_102").click().run()                               # 102 是空桌
     assert not at.exception, [e.value for e in at.exception]
     assert at.session_state["sel"] == {"kind": "table", "key": "102"}
     assert any("桌 102" in m.value and "開桌點餐" in m.value for m in at.markdown)
-    [b for b in at.button if b.key == "padk_ocart_102_1"][0].click().run()   # 點咖哩飯
-    [b for b in at.button if b.key == "send_ocart_102"][0].click().run()    # 送出
+    press(at, "padk_ocart_102_1").click().run()                                 # 點咖哩飯（共用）
+    press(at, "send_ocart_102").click().run()                                   # 送出
     assert not at.exception, [e.value for e in at.exception]
     od = next(x for x in o.open_orders(seeded) if x["table_no"] == "102")
-    assert od["guests"] == 2 and [l["name"] for l in od["lines"]] == ["咖哩飯"]
-    assert at.session_state["sel"] == {"kind": "table", "key": "102"}       # 留在外場同一桌
+    assert [l["name"] for l in od["lines"]] == ["咖哩飯"] and od["guests"] is None   # 沒指定座位 → 不亂算人數
+    assert at.session_state["sel"] == {"kind": "table", "key": "102"}           # 留在外場同一桌
     assert any("已送出" in m.value and "桌 102" in m.value and "#00" in m.value for m in at.success)
+
+
+def test_tapping_a_seat_orders_for_that_guest_and_counts_people(seeded):
+    at = run()
+    press(at, "seate_", "_102_3").click().run()                                 # 直接點 102 的座 3
+    assert at.session_state["sel"] == {"kind": "table", "key": "102"} and at.session_state["sel_seat"] == 3
+    assert any("算座 3 的" in m.value for m in at.markdown)
+    press(at, "padk_ocart_102_1").click().run()                                 # 點的菜自動算座 3
+    press(at, "send_ocart_102").click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    od = next(x for x in o.open_orders(seeded) if x["table_no"] == "102")
+    assert od["lines"][0]["seat_no"] == 3 and od["guests"] == 1                # 人數＝有點餐的座位數
+    at.run()
+    assert "1道" in press(at, "seats_", "_102_3").label                         # 座位圖馬上顯示座 3 點了 1 道（選中＝藍色）
+    press(at, "ws_close").click().run()                                          # 收起後，座 3 顯示為「有人坐」
+    assert "1道" in press(at, "seatf_", "_102_3").label
 
 
 def test_dashboard_handles_dishes_checkout_and_takeout_in_one_page(seeded):
     at = run()
-    board = next(m.value for m in at.markdown if "class='qboard'" in m.value)             # 叫號看板（取代數字方塊）
+    board = next(m.value for m in at.markdown if "class='qboard'" in m.value)  # 叫號看板
     assert "準備中" in board and "#001" in board and "外帶" in board
-    [b for b in at.button if b.key == "pick_101"][0].click().run()
+    press(at, "tbl_", "_101").click().run()
     assert not at.exception, [e.value for e in at.exception]
     md = " ".join(m.value for m in at.markdown)
     assert "第 1 輪" in md and "🕒" in md                                      # 每輪都有時間
-    tabs = [t.label for t in at.tabs]
-    for name in ("🍽️ 餐點", "➕ 加點", "👥 座位", "💵 結帳", "📣 通知", "🔀 換桌"):
-        assert name in tabs
+    exp = [e.label for e in at.expander]
+    assert any(x.startswith("💵 結帳") for x in exp) and "📣 通知廚房／吧台" in exp and "🔀 換桌／併桌" in exp
+    assert any("製作中" in i.value for i in at.info)                            # 下一步：等廚房
     od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
-    [b for b in at.button if b.key == f"payall{od['id']}"][0].click().run()  # 同一頁直接結清
+    press(at, f"payall{od['id']}").click().run()                                # 先結帳
     assert not at.exception, [e.value for e in at.exception]
     od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
-    assert od["paid_all"] and at.session_state["sel"]["key"] == "101"          # 結清了，但客人還在 → 訂單仍在
-    assert not [b for b in at.button if b.key == f"close{od['id']}"]           # 餐還沒上完 → 不能按完成
-    assert any("客人離開前需要" in c.value and "上完" in c.value for c in at.caption)
+    assert od["paid_all"] and at.session_state["sel"]["key"] == "101"           # 結清了，但客人還在
     for _ in range(2):
         o.advance_ticket(seeded, od["id"], 1)
-    o.serve_all_ready(seeded, od["id"])
     at.run()
-    [b for b in at.button if b.key == f"close{od['id']}"][0].click().run()     # 👋 客人離開・完成
+    press(at, f"next_serve{od['id']}").click().run()                            # 下一步：上菜
+    press(at, f"close{od['id']}").click().run()                                 # 下一步：客人離開
     assert not at.exception, [e.value for e in at.exception]
     assert not any(x["table_no"] == "101" for x in o.open_orders(seeded))
     assert "sel" not in at.session_state
-    # 外帶：在接單分頁開新外帶單
-    [b for b in at.button if b.key == "new_takeout"][0].click().run()
-    [b for b in at.button if b.key == "padk_ocart_takeout_2"][0].click().run()
-    [b for b in at.button if b.key == "send_ocart_takeout"][0].click().run()
+    # 外帶：開新外帶單
+    press(at, "new_takeout").click().run()
+    press(at, "padk_ocart_takeout_2").click().run()
+    press(at, "send_ocart_takeout").click().run()
     assert not at.exception, [e.value for e in at.exception]
-    assert at.session_state["sel"]["kind"] == "order"                         # 送出後直接切到這張外帶單
+    assert at.session_state["sel"]["kind"] == "order"                           # 送出後直接切到這張外帶單
 
 
 def test_seats_and_who_ordered_what_reach_the_kitchen_screen(seeded):
     cid = o.add_customer(seeded, "王小姐", avoid="不吃香菜")
     at = run()
-    [b for b in at.button if b.key == "pick_102"][0].click().run()          # 空桌開桌
-    at.selectbox(key="nseat_c_102_1").set_value(cid).run()                   # 座 1 是熟客
-    at.text_input(key="nseat_n_102_2").set_value("陳先生").run()
-    [b for b in at.button if b.key == "padk_ocart_102_1"][0].click().run()   # 咖哩飯
-    uid = at.session_state["ocart_102"][0]["uid"]
-    [b for b in at.button if b.key == f"os{uid}__1"][0].click().run()        # 這道是座 1 點的
-    [b for b in at.button if b.key == "send_ocart_102"][0].click().run()
+    press(at, "seate_", "_102_1").click().run()                                 # 點空桌的座 1
+    at.selectbox(key="sp_c_102_1").set_value(cid).run()                         # 這位是熟客
+    press(at, "sp_s_102_1").click().run()
+    press(at, "sel_seat__2").click().run()                                      # 換到座 2，登記名字
+    at.text_input(key="sp_n_102_2").set_value("陳先生").run()
+    press(at, "sp_s_102_2").click().run()
+    press(at, "sel_seat__1").click().run()                                      # 回到座 1 點餐
+    press(at, "padk_ocart_102_1").click().run()
+    press(at, "send_ocart_102").click().run()
     assert not at.exception, [e.value for e in at.exception]
+    od = next(x for x in o.open_orders(seeded) if x["table_no"] == "102")
     line = [t for t in o.kitchen_tickets(seeded) if t["where"] == "桌 102"][0]["lines"][0]
     assert (line["seat_no"], line["guest"], line["avoid"], line["regular"]) == (1, "王小姐", "不吃香菜", True)
-    seats = {x["seat_no"]: x["guest_name"] for x in o.order_seats(seeded, line and o.open_orders(seeded)[-1]["id"])}
-    assert seats == {1: "王小姐", 2: "陳先生"}
+    assert {x["seat_no"]: x["guest_name"] for x in od["seats"]} == {1: "王小姐", 2: "陳先生"}
+    assert od["guests"] == 2                                                     # 兩個登記的座位
     k = AppTest.from_string(HEAD + "\nst.session_state.setdefault('user', {'id': 1, 'name': 'x', 'role': 'owner'})"
                             "\nkitchen_page()\n", default_timeout=30).run()
     assert not k.exception, [e.value for e in k.exception]
@@ -240,9 +263,9 @@ def test_settings_page_renders_menu_combos_and_regulars(seeded):
 
 def test_floor_notifies_kitchen_from_the_dashboard(seeded):
     at = run()
-    [b for b in at.button if b.key == "pick_101"][0].click().run()
+    press(at, "tbl_", "_101").click().run()
     od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
-    [b for b in at.button if b.key == f"nk{od['id']}_0"][0].click().run()
+    press(at, f"nk{od['id']}_0").click().run()
     assert [(c["message"], c["table_no"]) for c in o.open_calls(seeded, "to_kitchen")] == [("請加快這桌", "桌 101")]
 
 

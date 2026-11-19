@@ -13,6 +13,7 @@ from datetime import date
 from uuid import uuid4
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 from ops import db, orders, services as s, uber
 from ops.ui import PAY, login_view, sidebar_user
@@ -70,13 +71,15 @@ button[data-baseweb="tab"]{min-height:3rem;font-size:1.15rem;padding:0 1.1rem}
 .kpi span{display:block;font-size:.82rem;opacity:.75}
 .kpi b{font-size:1.45rem;font-variant-numeric:tabular-nums}
 [data-testid="stPopover"] button{min-height:3.2rem;font-size:1.02rem;justify-content:flex-start}
-.qboard{display:grid;grid-template-columns:repeat(auto-fit,minmax(10.5rem,1fr));gap:.5rem;margin:.4rem 0 .7rem}
+.qboard{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:.35rem;margin:.4rem 0 .7rem}
 .qcol{border:3px solid;border-radius:16px;padding:.4rem .5rem;background:rgba(127,127,127,.05)}
 .qcol h4{margin:0 0 .3rem;font-size:1rem;padding:0}
 .qc-cooking{border-color:#f08c00}.qc-ready{border-color:#2f7de1}.qc-dining{border-color:#c9a400}
 .qchips{display:flex;flex-wrap:wrap;gap:.35rem}
 .qchip{border-radius:12px;padding:.25rem .55rem;background:rgba(127,127,127,.12);line-height:1.15}
-.qchip b{display:block;font-size:1.5rem;font-variant-numeric:tabular-nums}
+.qchip b{display:block;font-size:1.3rem;font-variant-numeric:tabular-nums}
+.qcol h4{font-size:.88rem !important;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qcol{min-width:0}
 .qchip span{font-size:.8rem;opacity:.85}
 .qchip i{display:block;font-style:normal;font-size:.75rem;color:#2e9e5b;font-weight:700}
 .qc-ready .qchip{background:rgba(47,125,225,.16)}
@@ -94,6 +97,23 @@ button[data-baseweb="tab"]{min-height:3rem;font-size:1.15rem;padding:0 1.1rem}
 [class*="st-key-padk_"] button p,[class*="st-key-padb_"] button p,[class*="st-key-padc_"] button p{color:#fff;font-size:1rem;line-height:1.25}
 .pad-legend i{display:inline-block;width:.8rem;height:.8rem;border-radius:4px;margin:0 .2rem 0 .5rem;vertical-align:-1px}
 .pad-legend .lk{background:#e5484d}.pad-legend .lb{background:#2f7de1}.pad-legend .lc{background:#7c4dff}
+/* 座位圖：座位（空＝虛線、有人＝暖色、選到＝藍）＋中間的桌子（顏色＝狀態），全部可以點 */
+[class*="st-key-seate_"] button,[class*="st-key-seatf_"] button,[class*="st-key-seats_"] button{
+ min-height:2.7rem;border-radius:999px;font-size:.92rem;padding:.2rem .3rem}
+[class*="st-key-seate_"] button{border:2px dashed rgba(127,127,127,.55);background:transparent}
+[class*="st-key-seatf_"] button{border:0;background:#ffe2b8;color:#6b3a00}
+[class*="st-key-seats_"] button{border:0;background:#2f7de1;color:#fff}
+[class*="st-key-seatf_"] button p{color:#6b3a00;font-size:.92rem}
+[class*="st-key-seats_"] button p{color:#fff;font-size:.92rem}
+[class*="st-key-seate_"] button p{font-size:.92rem}
+[class*="st-key-tbl_"] button{min-height:4.4rem;border-radius:14px;border:0;font-weight:800;margin:.15rem 0}
+[class*="st-key-tbl_"] button p{color:#fff;font-size:1rem;line-height:1.3}
+[class*="st-key-tbl_empty_"] button{background:#2e9e5b}
+[class*="st-key-tbl_new_"] button{background:#e5484d}
+[class*="st-key-tbl_preparing_"] button{background:#f08c00}
+[class*="st-key-tbl_ready_"] button{background:#2f7de1}
+[class*="st-key-tbl_dining_"] button{background:#b89400}
+[class*="st-key-tbl_"][class*="_on_"] button{box-shadow:0 0 0 4px rgba(20,20,20,.75)}
 </style>
 """, unsafe_allow_html=True)
 
@@ -244,98 +264,93 @@ KIND_ICON = {"dine_in": "🍽️", "takeout": "🥡", "uber": "🛵"}
 STATION_ICON = {"kitchen": "🍳", "bar": "🍹"}
 
 
-# ───────────────────────── 外場總控台 ─────────────────────────
-STAGE_COLOR = {"empty": "#2e9e5b", "new": "#e5484d", "preparing": "#f08c00", "ready": "#2f7de1", "dining": "#c9a400"}
-# 椅子位置：一邊兩人（上排 1、2，下排 3、4）；超過 4 人時加在兩側
-CHAIRS = [(42, 11), (78, 11), (42, 79), (78, 79), (12, 45), (108, 45), (12, 20), (108, 70)]
+# ───────────────────────── 外場總控台：可觸控的座位圖 ─────────────────────────
+TABLE_ICON = {"empty": "🟩", "new": "🟥", "preparing": "🟧", "ready": "🟦", "dining": "🟨"}
 
 
-def table_svg(t):
-    """一張桌子的圖示：桌面顏色＝流程階段；椅子一邊兩個，實心＝有人坐，椅子上標座位號碼。"""
-    col = STAGE_COLOR[t["stage"]]
-    guests = t.get("guests") or 0
-    n = min(8, max(t["seats"], guests))
-    chairs = ""
-    for i, (x, y) in enumerate(CHAIRS[:n]):
-        filled = i < guests
-        chairs += (f"<circle cx='{x}' cy='{y}' r='10' fill='{col if filled else 'none'}' stroke='{col}' stroke-width='2.5'/>"
-                   f"<text x='{x}' y='{y + 4}' text-anchor='middle' font-size='11' font-weight='700' "
-                   f"fill='{'#fff' if filled else col}'>{i + 1}</text>")
-    return (f"<svg viewBox='0 0 120 90' width='112' height='84' role='img' aria-label='桌 {html.escape(t['name'])}'>"
-            f"<rect x='24' y='25' width='72' height='40' rx='9' fill='{col}'/>{chairs}"
-            f"<text x='60' y='51' text-anchor='middle' font-size='17' font-weight='800' fill='#fff'>"
-            f"{html.escape(t['name'])}</text></svg>")
-
-
-def table_card_html(t, selected=False):
-    stage = t["stage"]
-    col = STAGE_COLOR[stage]
-    if stage == "empty":
-        sub = f"空桌・{t['seats']} 人桌（一邊兩人）"
-        body = "<div class='tc-empty'>點下方「開桌點餐」</div>"
-    else:
-        paid = "　<span class='tc-paid'>💵 已結帳</span>" if t.get("paid_all") else ""
-        sub = (f"<b>{t.get('queue') or ''}</b>　🕒{hhmm(t.get('opened_at'))}・{t['guests'] or '-'}/{t['seats']} 人"
-               f"・＄{t['unpaid_total']}{paid}")
-        items = []
-        for d in t["dishes"][:5]:
-            seat = f"<small>座{d['seat_no']}</small> " if d.get("seat_no") else ""
-            combo = f"<small>（{html.escape('＋'.join(d['components']))}）</small>" if d.get("components") else ""
-            items.append(f"<li>{ICON[d['status']]} {seat}{d['qty']}× {html.escape(d['name'])}{combo}</li>")
-        if len(t["dishes"]) > 5:
-            items.append(f"<li class='tc-more'>…還有 {len(t['dishes']) - 5} 項</li>")
-        body = "<ul class='tc-dishes'>" + "".join(items) + "</ul>"
-    return (f"<div class='tcard{' tc-sel' if selected else ''}' style='border-color:{col}'>"
-            f"<div class='tc-head'>{table_svg(t)}<div><b style='color:{col}'>{orders.STAGE_LABEL[stage]}</b>"
-            f"<br><span class='tc-sub'>{sub}</span></div></div>{body}</div>")
-
-
-def queue_board_html(board):
-    """叫號看板：所有單（內用、外帶、Uber）的單號，依狀態分三區。"""
-    cols = []
-    for key, label in orders.QUEUE_GROUPS:
-        chips = "".join(
-            f"<div class='qchip'><b>{x['queue']}</b><span>{KIND_ICON[x['kind']]} {html.escape(x['where'])}</span>"
-            + ("<i>已結帳</i>" if x["paid_all"] else "") + "</div>" for x in board[key]) or "<div class='qempty'>—</div>"
-        cols.append(f"<div class='qcol qc-{key}'><h4>{label}（{len(board[key])}）</h4><div class='qchips'>{chips}</div></div>")
-    return "<div class='qboard'>" + "".join(cols) + "</div>"
-
-
-def calls_panel(c):
-    """廚房／吧台呼叫外場：最上方一直顯示到有人按「收到」。"""
-    user = st.session_state.user
-    for call in orders.open_calls(c):
-        where = f"（{call['table_no']}）" if call["table_no"] else ""
-        st.error(f"🔔 **呼叫外場：{call['message']}**{where}　🕒{hhmm(call['created_at'])}"
-                 f"・{orders.wait_minutes(call['created_at'])} 分鐘前")
-        if st.button("✅ 收到，馬上過去", key=f"ack{call['id']}", type="primary", use_container_width=True):
-            orders.ack_call(c, call["id"], user["id"])
-            st.rerun()
-
-
-@st.dialog("🔔 廚房／吧台呼叫外場")
-def floor_alert_dialog():
-    ring()
-    c = db.connect()
-    try:
-        calls = orders.open_calls(c)
-        if not calls:
-            st.write("已經有人回應了。")
-        for call in calls:
-            where = f"（{call['table_no']}）" if call["table_no"] else ""
-            st.markdown(f"## {call['message']}{where}")
-            st.caption(f"🕒 {hhmm(call['created_at'])} 呼叫")
-            if st.button("✅ 收到，馬上過去", key=f"dack{call['id']}", type="primary", use_container_width=True):
-                orders.ack_call(c, call["id"], st.session_state.user["id"])
-                st.rerun()
-        if st.button("稍後處理", key="dlater", use_container_width=True):
-            st.rerun()
-    finally:
-        c.close()
-
-
-def _select(kind, key):
+def _select(kind, key, seat=None):
     st.session_state["sel"] = {"kind": kind, "key": key}
+    st.session_state["sel_seat"] = seat or 0
+    st.session_state["scroll_ws"] = True   # 點了桌子或座位 → 畫面自動捲到處理區
+
+
+SCROLL_TO_WORKSPACE = """<script>
+const a = window.parent.document.querySelector('.ws-anchor');
+if (a) { a.scrollIntoView({behavior: 'smooth', block: 'start'}); }
+</script>"""
+
+
+def _pending_seats(table):
+    """空桌還沒送單前登記的座位（誰坐、不吃什麼），送單時一起寫入。"""
+    return st.session_state.setdefault(f"pseats_{table}", {})
+
+
+def _seat_info(t):
+    """座位圖要顯示的資料：每個座位坐誰、不吃什麼、點了幾道。座位與訂單資料直接連動。"""
+    n_seats = max(t["seats"], t.get("guests") or 0)
+    info = {n: {"name": "", "avoid": "", "regular": False, "dishes": 0} for n in range(1, n_seats + 1)}
+    for x in t.get("seats_info", []):
+        i = info.setdefault(x["seat_no"], {"name": "", "avoid": "", "regular": False, "dishes": 0})
+        i.update(name=x["guest_name"] or "", avoid=x["avoid"] or "", regular=bool(x["customer_id"]))
+    if t["stage"] == "empty":
+        for n, x in _pending_seats(t["name"]).items():
+            i = info.setdefault(int(n), {"name": "", "avoid": "", "regular": False, "dishes": 0})
+            i.update(name=x.get("guest_name") or "", avoid=x.get("avoid") or "", regular=bool(x.get("customer_id")))
+    for d in t["dishes"]:
+        if d.get("seat_no"):
+            info.setdefault(d["seat_no"], {"name": "", "avoid": "", "regular": False, "dishes": 0})["dishes"] += d["qty"]
+    return info
+
+
+def _seat_label(n, i):
+    label = f"{n}"
+    if i["name"]:
+        label += f" {('⭐' if i['regular'] else '')}{i['name'][:4]}"
+    if i["dishes"]:
+        label += f"・{i['dishes']}道"
+    if i["avoid"]:
+        label += " 🚫"
+    return label
+
+
+def table_map(t, sel):
+    """一張桌子的座位圖：上排座 1、2，中間是桌子，下排座 3、4（一邊兩人）。座位和桌子都可以點。"""
+    info = _seat_info(t)
+    on_table = sel.get("kind") == "table" and sel.get("key") == t["name"]
+    sel_seat = st.session_state.get("sel_seat") if on_table else None
+
+    def seat_button(col, n):
+        i = info.get(n)
+        if not i:
+            return
+        kind = "s" if sel_seat == n else ("f" if (i["name"] or i["dishes"] or i["avoid"]) else "e")
+        tip = (f"座 {n}：{i['name'] or '未登記'}" + (f"，不吃：{i['avoid']}" if i["avoid"] else "")
+               + (f"，點了 {i['dishes']} 道" if i["dishes"] else ""))
+        if col.button(_seat_label(n, i), key=f"seat{kind}_{t['name']}_{n}", use_container_width=True, help=tip):
+            _select("table", t["name"], n)
+            st.rerun()
+
+    seats = sorted(info)
+    top, bottom, extra = seats[:2], seats[2:4], seats[4:]
+    row = st.columns(2)
+    for col, n in zip(row, top):
+        seat_button(col, n)
+    stage = t["stage"]
+    if stage == "empty":
+        text = f"{t['name']}  \n空桌・點座位開桌"
+    else:
+        money = "💵已結帳" if t.get("paid_all") else f"＄{t['unpaid_total']}"
+        text = f"{t['name']}　{t.get('queue') or ''}  \n{orders.STAGE_LABEL[stage]}・{money}"
+    if st.button(text, key=f"tbl_{stage}_{'on' if on_table else 'off'}_{t['name']}", use_container_width=True):
+        _select("table", t["name"])
+        st.rerun()
+    row = st.columns(2)
+    for col, n in zip(row, bottom):
+        seat_button(col, n)
+    for k in range(0, len(extra), 2):
+        row = st.columns(2)
+        for col, n in zip(row, extra[k:k + 2]):
+            seat_button(col, n)
 
 
 @st.fragment(run_every=5)
@@ -383,20 +398,16 @@ def _floor_board():
         floors = ov["floors"]
         labels = [f"{names.get(f, f'{f} 樓')}（{sum(1 for t in ov['tables'] if t['floor'] == f and t['stage'] != 'empty')}/"
                   f"{sum(1 for t in ov['tables'] if t['floor'] == f)}）" for f in floors]
-        tabs = st.tabs(labels + [f"📥 接單・外帶（{len(ov['takeouts'])}）"])
+        tabs = st.tabs(labels + [f"📥 外帶・Uber（{len(ov['takeouts'])}）"])
         for tab, f in zip(tabs, floors):
             with tab:
+                st.caption("點桌子＝整桌；點座位＝幫那位客人點餐、記不吃什麼。🟩空 🟥待接單 🟧製作中 🟦待上菜 🟨用餐中")
                 ts = [t for t in ov["tables"] if t["floor"] == f]
                 for i in range(0, len(ts), 2):
                     row = st.columns(2)
                     for col, t in zip(row, ts[i:i + 2]):
-                        chosen = sel.get("kind") == "table" and sel.get("key") == t["name"]
-                        col.markdown(table_card_html(t, chosen), unsafe_allow_html=True)
-                        label = "👉 處理中" if chosen else ("🍽️ 開桌點餐" if t["stage"] == "empty" else "點餐・結帳")
-                        if col.button(label, key=f"pick_{t['name']}", use_container_width=True,
-                                      type="primary" if chosen else "secondary"):
-                            _select("table", t["name"])
-                            st.rerun()   # 整頁重整，打開下方的處理區
+                        with col.container(border=True):
+                            table_map(t, sel)
         with tabs[-1]:
             if st.button("＋ 新外帶單", key="new_takeout", type="primary", use_container_width=True):
                 _select("new", "takeout")
@@ -404,18 +415,226 @@ def _floor_board():
             if not ov["takeouts"]:
                 st.caption("目前沒有外帶或 Uber 訂單")
             for tk in ov["takeouts"]:
-                icon = "🛵 " if tk["where"].startswith("Uber") else "🥡 "
-                dishes = "、".join(f"{ICON[d['status']]}{d['qty']}×{d['name']}" for d in tk["dishes"])
+                icon = "🛵" if tk["where"].startswith("Uber") else "🥡"
+                money = "💵已結帳" if tk.get("paid_all") else f"＄{tk['unpaid_total']}"
+                dishes = "、".join(f"{d['qty']}×{d['name']}" for d in tk["dishes"])
                 chosen = sel.get("kind") == "order" and sel.get("key") == tk["order_id"]
-                paid = "　💵已結帳" if tk.get("paid_all") else ""
-                with st.container(border=True):
-                    st.markdown(f"**{tk.get('queue') or ''}**　{TILE[tk['stage']]} {icon}**{tk['where']}**　"
-                                f"{orders.STAGE_LABEL[tk['stage']]}　🕒{hhmm(tk['opened_at'])}・⏱{tk['wait']} 分"
-                                f"　＄{tk['unpaid_total']}{paid}  \n{dishes}")
-                    if st.button("👉 處理中" if chosen else "處理這張單", key=f"pick_o{tk['order_id']}",
-                                 type="primary" if chosen else "secondary", use_container_width=True):
-                        _select("order", tk["order_id"])
-                        st.rerun()
+                if st.button(f"{tk.get('queue') or ''}　{icon} {tk['where']}・{orders.STAGE_LABEL[tk['stage']]}・{money}  \n"
+                             f"🕒{hhmm(tk['opened_at'])}　{dishes}", key=f"pick_o{tk['order_id']}",
+                             type="primary" if chosen else "secondary", use_container_width=True):
+                    _select("order", tk["order_id"])
+                    st.rerun()
+    finally:
+        c.close()
+
+
+def _next_step(od):
+    """依目前狀況只給一個「下一步」：上菜 → 結帳 → 客人離開。回傳是否該打開結帳區。"""
+    if od["to_serve"]:
+        if st.button(f"🛎️ 下一步：上菜（{od['to_serve']} 道做好了）", type="primary", use_container_width=True,
+                     key=f"next_serve{od['id']}"):
+            orders.serve_all_ready(conn, od["id"])
+            st.session_state["last_order"] = f"{od['where']} 已上菜"
+            st.rerun()
+        return False
+    if od["can_close"]:
+        if st.button("👋 下一步：客人離開・完成（桌子清空）", type="primary", use_container_width=True,
+                     key=f"close{od['id']}"):
+            try:
+                orders.close_order(conn, od["id"])
+                st.session_state.pop("sel", None)
+                st.session_state["last_order"] = f"{od['where']}（{od['queue']}）已完成，桌子已清空"
+                st.rerun()
+            except s.OpsError as e:
+                st.error(str(e))
+        return False
+    if od["unfinished"]:
+        st.info(f"🔥 廚房／吧台製作中（{od['unfinished']} 道），做好會響鈴通知。"
+                + ("　💵 已結帳" if od["paid_all"] else ""))
+        return False
+    if od["unpaid_total"] > 0:
+        st.warning(f"✅ 餐點都上齊了，下一步：結帳 ＄{od['unpaid_total']}（下方已打開）")
+        return True
+    return False
+
+
+def seat_panel(t, od):
+    """座位列：點座位＝之後點的餐算這位客人的；並可登記這位客人是誰、不吃什麼。"""
+    info = _seat_info(t)
+    labels = {0: "共用"}
+    labels.update({n: f"座{n}" + (f" {i['name'][:4]}" if i["name"] else "") + (" 🚫" if i["avoid"] else "")
+                   for n, i in info.items()})
+    st.markdown("**👥 點座位：幫誰點？**")
+    seat = choice_buttons("sel_seat", list(labels), labels, cols=min(5, len(labels)))
+    if not seat:
+        return 0
+    i = info[seat]
+    current = {x["seat_no"]: x for x in (od["seats"] if od else [])}
+    pend = _pending_seats(t["name"]) if not od else {}
+    cur = current.get(seat) or pend.get(seat) or {}
+    with st.container(border=True):
+        mine = [ln for ln in (od["lines"] if od else []) if ln.get("seat_no") == seat and ln["status"] != "cancelled"]
+        mine_txt = "、".join(f"{ICON[ln['status']]}{ln['qty']}×{ln['name']}" for ln in mine)
+        st.markdown(f"**座 {seat}**　{('⭐' if i['regular'] else '')}{i['name'] or '（未登記）'}"
+                    + (f"　:red[🚫 不吃：{i['avoid']}]" if i["avoid"] else "")
+                    + (f"  \n已點：{mine_txt}" if mine else ""))
+        with st.expander("✏️ 登記／修改這位客人（熟客、名字、不吃什麼）"):
+            customers = orders.list_customers(conn)
+            cmap = {c["id"]: c for c in customers}
+            options = [0] + list(cmap)
+            idx = options.index(cur.get("customer_id")) if cur.get("customer_id") in options else 0
+            key = f"{od['id'] if od else t['name']}_{seat}"
+            cid = st.selectbox("熟客", options, index=idx, key=f"sp_c_{key}",
+                               format_func=lambda x: "（不是熟客）" if x == 0 else
+                               f"⭐ {cmap[x]['name']}" + (f"（不吃：{cmap[x]['avoid']}）" if cmap[x]["avoid"] else ""))
+            name = st.text_input("名字或稱呼", value=cur.get("guest_name") or "", key=f"sp_n_{key}",
+                                 placeholder="例：陳先生、小朋友")
+            avoid = st.text_input("不吃什麼／過敏", value="" if cur.get("customer_id") else (cur.get("avoid") or ""),
+                                  key=f"sp_a_{key}", placeholder="例：不吃牛、蝦過敏")
+            if st.button(f"儲存座 {seat}", key=f"sp_s_{key}", use_container_width=True):
+                try:
+                    if od:
+                        orders.set_seat(conn, od["id"], seat, name, cid or None, avoid)
+                    else:   # 還沒開桌：先記著，送單時一起寫入
+                        pend[seat] = {"customer_id": cid or None, "guest_name": name, "avoid": avoid}
+                        if cid and cmap[cid]["avoid"]:
+                            pend[seat]["avoid"] = "；".join(x for x in (cmap[cid]["avoid"], avoid.strip()) if x)
+                            pend[seat]["guest_name"] = name.strip() or cmap[cid]["name"]
+                    st.session_state["last_order"] = f"已更新座 {seat}"
+                    st.rerun()
+                except s.OpsError as e:
+                    st.error(str(e))
+    return seat
+
+
+def _workspace():
+    """選到的桌子（或座位）或外帶單：同一頁由上往下做完——下一步、座位、點餐、已點、結帳。"""
+    sel = st.session_state.get("sel")
+    if not sel:
+        return
+    user = st.session_state.user
+    ov = orders.floor_overview(conn)
+    ods = {o["id"]: o for o in orders.open_orders(conn)}
+
+    def header(title, sub=""):
+        h1, h2 = st.columns([4, 1])
+        h1.markdown(f"### {title}" + (f"  \n{sub}" if sub else ""))
+        if h2.button("✕", key="ws_close", use_container_width=True, help="收起"):
+            st.session_state.pop("sel", None)
+            st.rerun()
+
+    st.markdown("<div class='ws-anchor'></div>", unsafe_allow_html=True)
+    with st.container(border=True):
+        if sel["kind"] == "new":
+            header("🥡 新外帶單")
+            order_form(user, "takeout", None, after=None, on_placed=lambda r: _select("order", r["order_id"]))
+            return
+        t = od = None
+        if sel["kind"] == "table":
+            t = next((x for x in ov["tables"] if x["name"] == sel["key"]), None)
+            if not t:
+                st.session_state.pop("sel", None)
+                return
+            od = ods.get(t["order_id"]) if t["order_id"] else None
+        else:
+            od = ods.get(sel["key"])
+            if not od:
+                st.session_state.pop("sel", None)
+                st.rerun()
+
+        if od:
+            stage = orders._stage_of(od)
+            paid = "💵 已結帳" if od["paid_all"] else f"待付 ＄{od['unpaid_total']}"
+            header(f"{od['queue']}　{TABLE_ICON[stage]} {od['where']}　{orders.STAGE_LABEL[stage]}",
+                   f"🕒 {hhmm(od['created_at'])} 開單・⏱ {orders.wait_minutes(od['created_at'])} 分鐘"
+                   f"{('・' + str(od['guests']) + ' 人') if od.get('guests') else ''}・{paid}")
+            if od["note"]:
+                st.markdown(f":red[⚠️ {od['note']}]")
+            pay_focus = _next_step(od)
+        else:
+            header(f"{TABLE_ICON['empty']} 桌 {t['name']}　開桌點餐", f"{t['seats']} 人桌（一邊兩人）・點座位再點餐，人數自動計算")
+            pay_focus = False
+
+        seat = seat_panel(t, od) if t else 0
+        if t:
+            info = _seat_info(t)
+            st.markdown(f"**➕ 點餐{'（算座 ' + str(seat) + ' 的）' if seat else '（共用）'}**")
+            order_form(user, "dine_in", t["name"], after=None, seat_count=len(info),
+                       seat_names={n: i["name"] for n, i in info.items() if i["name"]},
+                       seat_avoid={n: i["avoid"] for n, i in info.items() if i["avoid"]},
+                       default_seat=seat or None, new_table=od is None)
+        if not od:
+            return
+        st.markdown("**🍽️ 已點**（點一道菜可以上菜、招待或取消）")
+        _dish_buttons(od)
+        with st.expander(f"💵 結帳（{'已結清' if od['paid_all'] else '待付 ＄' + str(od['unpaid_total'])}）",
+                         expanded=pay_focus):
+            checkout_section(od)
+        with st.expander("📣 通知廚房／吧台"):
+            notify_kitchen_section(od)
+        if t:
+            with st.expander("🔀 換桌／併桌"):
+                move_section(t, ov)
+
+
+def floor_page():
+    top_bar()
+    st.header("🗺️ 外場總控台")
+    # 版面固定：訊息、處理區都放在永遠存在的位置，出現或消失都不會讓其他區塊重建
+    msg_box = st.container()
+    ws_box = st.container()   # 選了桌子或座位 → 處理區直接出現在最上面，不用往下找
+    if msg := st.session_state.pop("last_order", None):
+        msg_box.success(msg)
+    with ws_box:
+        _workspace()
+    _floor_board()
+    test_bell_button("bell_floor")
+    if st.session_state.pop("scroll_ws", False) and st.session_state.get("sel"):
+        components.html(SCROLL_TO_WORKSPACE, height=0)
+    if st.session_state.pop("floor_alert", False):   # 彈跳視窗放最後，同樣不影響上面的版面
+        floor_alert_dialog()
+
+
+def queue_board_html(board):
+    """叫號看板：所有單（內用、外帶、Uber）的單號，依狀態分三區。"""
+    cols = []
+    for key, label in orders.QUEUE_GROUPS:
+        chips = "".join(
+            f"<div class='qchip'><b>{x['queue']}</b><span>{KIND_ICON[x['kind']]} {html.escape(x['where'])}</span>"
+            + ("<i>已結帳</i>" if x["paid_all"] else "") + "</div>" for x in board[key]) or "<div class='qempty'>—</div>"
+        cols.append(f"<div class='qcol qc-{key}'><h4>{label}（{len(board[key])}）</h4><div class='qchips'>{chips}</div></div>")
+    return "<div class='qboard'>" + "".join(cols) + "</div>"
+
+
+def calls_panel(c):
+    """廚房／吧台呼叫外場：最上方一直顯示到有人按「收到」。"""
+    user = st.session_state.user
+    for call in orders.open_calls(c):
+        where = f"（{call['table_no']}）" if call["table_no"] else ""
+        st.error(f"🔔 **呼叫外場：{call['message']}**{where}　🕒{hhmm(call['created_at'])}"
+                 f"・{orders.wait_minutes(call['created_at'])} 分鐘前")
+        if st.button("✅ 收到，馬上過去", key=f"ack{call['id']}", type="primary", use_container_width=True):
+            orders.ack_call(c, call["id"], user["id"])
+            st.rerun()
+
+
+@st.dialog("🔔 廚房／吧台呼叫外場")
+def floor_alert_dialog():
+    ring()
+    c = db.connect()
+    try:
+        calls = orders.open_calls(c)
+        if not calls:
+            st.write("已經有人回應了。")
+        for call in calls:
+            where = f"（{call['table_no']}）" if call["table_no"] else ""
+            st.markdown(f"## {call['message']}{where}")
+            st.caption(f"🕒 {hhmm(call['created_at'])} 呼叫")
+            if st.button("✅ 收到，馬上過去", key=f"dack{call['id']}", type="primary", use_container_width=True):
+                orders.ack_call(c, call["id"], st.session_state.user["id"])
+                st.rerun()
+        if st.button("稍後處理", key="dlater", use_container_width=True):
+            st.rerun()
     finally:
         c.close()
 
@@ -554,35 +773,6 @@ def checkout_section(od):
             st.error(str(e))
 
 
-def seats_section(od, seats):
-    """座位：誰坐哪裡（可選熟客，自動帶入他不吃的東西）、不吃什麼。廚房與吧台都會看到。"""
-    current = {x["seat_no"]: x for x in od["seats"]}
-    customers = orders.list_customers(conn)
-    cmap = {c["id"]: c for c in customers}
-    st.caption("一邊兩人：座 1、2 在上排，座 3、4 在下排。熟客請先在「設定 → 熟客名單」建立。")
-    for n in range(1, seats + 1):
-        cur = current.get(n, {})
-        with st.container(border=True):
-            st.markdown(f"**座 {n}**" + (f"　{cur.get('guest_name') or ''}" if cur else "　（未登記）")
-                        + (f"　:red[🚫 {cur['avoid']}]" if cur.get("avoid") else ""))
-            options = [0] + [c["id"] for c in customers]
-            idx = options.index(cur["customer_id"]) if cur.get("customer_id") in options else 0
-            cid = st.selectbox("熟客", options, index=idx, key=f"seat_c_{od['id']}_{n}",
-                               format_func=lambda x: "（不是熟客／新客人）" if x == 0 else
-                               f"⭐ {cmap[x]['name']}" + (f"（不吃：{cmap[x]['avoid']}）" if cmap[x]["avoid"] else ""))
-            name = st.text_input("名字或稱呼", value=cur.get("guest_name") or "", key=f"seat_n_{od['id']}_{n}",
-                                 placeholder="例：陳先生、小朋友")
-            avoid = st.text_input("不吃什麼／過敏", value=(cur.get("avoid") or "") if not cur.get("customer_id") else "",
-                                  key=f"seat_a_{od['id']}_{n}", placeholder="例：不吃牛、蝦過敏")
-            if st.button(f"儲存座 {n}", key=f"seat_s_{od['id']}_{n}", use_container_width=True):
-                try:
-                    orders.set_seat(conn, od["id"], n, name, cid or None, avoid)
-                    st.session_state["last_order"] = f"已更新座 {n}"
-                    st.rerun()
-                except s.OpsError as e:
-                    st.error(str(e))
-
-
 def notify_kitchen_section(od):
     st.caption("送出後，對方會響鈴並跳出視窗。")
     target = choice_buttons(f"nk_to_{od['id']}", ["kitchen", "bar"], {"kitchen": "🍳 通知廚房", "bar": "🍹 通知吧台"})
@@ -620,109 +810,6 @@ def move_section(t, ov):
             st.rerun()
         except s.OpsError as e:
             st.error(str(e))
-
-
-def _close_button(od):
-    """客人離開・完成：要結清、餐點都上完才能按。"""
-    if od["can_close"]:
-        if st.button("👋 客人離開・完成", key=f"close{od['id']}", type="primary", use_container_width=True):
-            try:
-                orders.close_order(conn, od["id"])
-                st.session_state.pop("sel", None)
-                st.session_state["last_order"] = f"{od['where']}（{od['queue']}）已完成，桌子已清空"
-                st.rerun()
-            except s.OpsError as e:
-                st.error(str(e))
-    else:
-        need = []
-        if od["unpaid_total"] > 0:
-            need.append(f"結清 ＄{od['unpaid_total']}")
-        if od["unfinished"] or od["to_serve"]:
-            need.append(f"上完 {od['unfinished'] + od['to_serve']} 道")
-        st.caption("👋 客人離開前需要：" + "、".join(need))
-
-
-def _workspace():
-    """選到的桌子或訂單：在同一頁處理餐點、加點、座位、結帳、通知、換桌。
-    放在自動更新區外面，打字、選需求時畫面不會被重整打斷。"""
-    sel = st.session_state.get("sel")
-    if not sel:
-        return
-    user = st.session_state.user
-    ov = orders.floor_overview(conn)
-    ods = {o["id"]: o for o in orders.open_orders(conn)}
-
-    def header(title, sub=""):
-        h1, h2 = st.columns([3, 1])
-        h1.markdown(f"## {title}" + (f"  \n{sub}" if sub else ""))
-        if h2.button("✕ 收起", key="ws_close", use_container_width=True):
-            st.session_state.pop("sel", None)
-            st.rerun()
-
-    with st.container(border=True):
-        if sel["kind"] == "new":
-            header("🥡 新外帶單")
-            order_form(user, "takeout", None, after=None, on_placed=lambda r: _select("order", r["order_id"]))
-            return
-        if sel["kind"] == "table":
-            t = next((x for x in ov["tables"] if x["name"] == sel["key"]), None)
-            if not t:
-                st.session_state.pop("sel", None)
-                return
-            if t["stage"] == "empty":
-                header(f"{TILE['empty']} 桌 {t['name']}　開桌點餐", f"{t['seats']} 人桌・一邊兩人")
-                order_form(user, "dine_in", t["name"], guests_seats=t["seats"], after=None, seat_count=t["seats"])
-                return
-            od = ods.get(t["order_id"])
-        else:
-            t = None
-            od = ods.get(sel["key"])
-        if not od:
-            st.session_state.pop("sel", None)
-            st.rerun()
-        stage = orders._stage_of(od)
-        paid = "・💵 已結帳" if od["paid_all"] else f"・待付 ＄{od['unpaid_total']}"
-        header(f"{od['queue']}　{TILE[stage]} {od['where']}　{orders.STAGE_LABEL[stage]}",
-               f"🕒 {hhmm(od['created_at'])} 開單・⏱ {orders.wait_minutes(od['created_at'])} 分鐘"
-               f"{('・' + str(od['guests']) + ' 人') if od.get('guests') else ''}{paid}")
-        _close_button(od)
-        if od["note"]:
-            st.markdown(f":red[⚠️ {od['note']}]")
-        names = ["🍽️ 餐點", "💵 結帳", "📣 通知"]
-        if t:
-            names[1:1] = ["➕ 加點", "👥 座位"]
-            names.append("🔀 換桌")
-        tabs = dict(zip(names, st.tabs(names)))
-        with tabs["🍽️ 餐點"]:
-            _dish_buttons(od)
-        if t:
-            with tabs["➕ 加點"]:
-                order_form(user, "dine_in", t["name"], after=None, seat_count=t["seats"],
-                           seat_names={x["seat_no"]: x["guest_name"] for x in od["seats"]},
-                           seat_avoid={x["seat_no"]: x["avoid"] for x in od["seats"] if x["avoid"]})
-            with tabs["👥 座位"]:
-                seats_section(od, max(t["seats"], od.get("guests") or 0))
-        with tabs["💵 結帳"]:
-            checkout_section(od)
-        with tabs["📣 通知"]:
-            notify_kitchen_section(od)
-        if t:
-            with tabs["🔀 換桌"]:
-                move_section(t, ov)
-
-
-def floor_page():
-    top_bar()
-    st.header("🗺️ 外場總控台")
-    # 提示訊息放在一個固定存在的位置：訊息出現或消失都不會讓下方的分頁重建（不會跳回第一個分頁）
-    msg_box = st.container()
-    if msg := st.session_state.pop("last_order", None):
-        msg_box.success(msg)
-    _floor_board()
-    _workspace()
-    test_bell_button("bell_floor")
-    if st.session_state.pop("floor_alert", False):   # 彈跳視窗放最後，同樣不影響上面的版面
-        floor_alert_dialog()
 
 
 # ───────────────────────── 點餐表單（外場總控台與點餐頁共用） ─────────────────────────
@@ -791,9 +878,11 @@ def item_dialog(ckey, uid, seat_count, seat_names, seat_avoid):
         st.rerun()
 
 
-def order_form(user, otype, table, guests_seats=None, after="floor", on_placed=None, seat_count=None,
-               seat_names=None, seat_avoid=None):
+def order_form(user, otype, table, after="floor", on_placed=None, seat_count=None,
+               seat_names=None, seat_avoid=None, default_seat=None, new_table=False):
     """點餐：DJ 打碟墊式的大方塊，按一下直接加入，並立刻跳出「誰點的、不吃什麼、備註」視窗。
+    default_seat：在外場點了某個座位 → 新點的菜預設算那個座位的（視窗裡仍可改）。
+    new_table：空桌開桌；人數＝實際有點餐或有登記的座位數，不用另外選。
     每桌（或外帶）有自己的購物車，換桌不會混在一起。
     after=None：送出後留在原頁；否則送出後換到該頁。on_placed(r)：送出成功時呼叫。"""
     accepting = orders.kitchen_status(conn)["accepting"]
@@ -801,28 +890,9 @@ def order_form(user, otype, table, guests_seats=None, after="floor", on_placed=N
         kitchen_banner(conn)
     ckey = f"ocart_{table or 'takeout'}"
     cart = st.session_state.setdefault(ckey, [])
-    gkey = f"guests_{table}"
     seat_names = dict(seat_names or {})
     seat_avoid = dict(seat_avoid or {})
-    seats_info = {}
-    if guests_seats:
-        st.markdown("**用餐人數**")
-        stepper(gkey, 1, guests_seats, 2)
-        customers = orders.list_customers(conn)
-        cmap = {c["id"]: c for c in customers}
-        with st.expander("👥 誰來用餐、不吃什麼（選填，廚房會看到）"):
-            for n in range(1, (seat_count or guests_seats) + 1):
-                c1, c2, c3 = st.columns([2, 2, 2])
-                cid = c1.selectbox(f"座 {n} 熟客", [0] + list(cmap), key=f"nseat_c_{table}_{n}",
-                                   format_func=lambda x: "—" if x == 0 else f"⭐ {cmap[x]['name']}")
-                name = c2.text_input(f"座 {n} 名字", key=f"nseat_n_{table}_{n}", placeholder="稱呼")
-                avoid = c3.text_input(f"座 {n} 不吃", key=f"nseat_a_{table}_{n}", placeholder="例：不吃牛")
-                if cid or name.strip() or avoid.strip():
-                    seats_info[n] = {"customer_id": cid or None, "guest_name": name, "avoid": avoid}
-                    seat_names[n] = name.strip() or (cmap[cid]["name"] if cid else "")
-                    known = "；".join(x for x in ((cmap[cid]["avoid"] if cid else None), avoid.strip()) if x)
-                    if known:
-                        seat_avoid[n] = known
+    pending = st.session_state.get(f"pseats_{table}", {}) if new_table else {}
 
     meals = [i for i in s.list_items(conn) if i["type"] == "meal"]
     combos = {i["id"]: orders.combo_components(conn, i["id"]) for i in meals}
@@ -842,7 +912,8 @@ def order_form(user, otype, table, guests_seats=None, after="floor", on_placed=N
             if col.button(f"{badge}{it['name']}  \n＄{it['price']}", key=f"pad{kind}_{ckey}_{it['id']}",
                           use_container_width=True):
                 uid = uuid4().hex[:8]
-                cart.append({"uid": uid, "item_id": it["id"], "qty": 1})
+                cart.append({"uid": uid, "item_id": it["id"], "qty": 1, "seat": default_seat})
+                st.session_state[f"os{uid}"] = default_seat or 0   # 視窗裡「誰點的」預設選好
                 st.session_state["pad_edit"] = [ckey, uid]
                 st.rerun()
 
@@ -884,10 +955,11 @@ def order_form(user, otype, table, guests_seats=None, after="floor", on_placed=N
     if st.button("📨 送出", type="primary", use_container_width=True, disabled=not accepting, key=f"send_{ckey}"):
         lines = [{"item_id": e["item_id"], "qty": e.get("qty", 1), "seat": e.get("seat"), "gift": e.get("gift", False),
                   "note": _entry_note(e)} for e in cart]
+        used = {ln["seat"] for ln in lines if ln["seat"]} | {int(n) for n in pending}
         try:
             r = orders.place_order(conn, otype, lines, table, order_note, user["id"],
-                                   guests=st.session_state.get(gkey) if guests_seats else None,
-                                   seats=seats_info or None)
+                                   guests=len(used) if (otype == "dine_in" and used) else None,
+                                   seats=pending or None)
         except s.OpsError as e:
             st.error(str(e))
             return
@@ -895,9 +967,7 @@ def order_form(user, otype, table, guests_seats=None, after="floor", on_placed=N
         for e in cart:
             for k in (f"oq{e['uid']}", f"on{e['uid']}", f"oa{e['uid']}", f"ot_{e['uid']}", f"os{e['uid']}", f"og{e['uid']}"):
                 st.session_state.pop(k, None)
-        for k in [k for k in st.session_state if str(k).startswith("nseat_") and str(k).split("_")[2] == str(table)]:
-            st.session_state.pop(k, None)
-        for k in (note_key, gkey, ckey):
+        for k in (note_key, ckey, f"pseats_{table}"):
             st.session_state.pop(k, None)
         msg = (f"已送出（單號 {orders.queue_label(r['queue_no'])}）：{where}"
                + (f"（第 {r['round_no']} 輪加點）" if r["is_addon"] else "") + "，廚房／吧台會響鈴通知")
@@ -948,7 +1018,7 @@ def order_page():
             with tab:
                 table_grid([t for t in ov["tables"] if t["floor"] == f], _pick_order_table, table, key=f"ot{f}")
     if table and info:
-        order_form(user, "dine_in", table, guests_seats=info["seats"] if info["stage"] == "empty" else None,
+        order_form(user, "dine_in", table, new_table=info["stage"] == "empty",
                    after="floor", seat_count=info["seats"],
                    seat_names={x["seat_no"]: x["guest_name"] for x in info.get("seats_info", [])},
                    seat_avoid={x["seat_no"]: x["avoid"] for x in info.get("seats_info", []) if x["avoid"]})
