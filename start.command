@@ -42,6 +42,16 @@ else:
         print("  開啟後台時會請你建立新的老闆帳號；舊檔案若需要救回，請告訴 Claude")
 PY
 
+echo "→ 關閉還在跑的舊版系統（避免新舊程式混在一起）"
+for port in 8501 8502; do
+  pids=$(lsof -ti tcp:$port 2>/dev/null)
+  if [ -n "$pids" ]; then
+    echo "  關閉舊的系統（port $port）"
+    kill $pids 2>/dev/null
+    sleep 1
+  fi
+done
+
 IP=$(ipconfig getifaddr en0 2>/dev/null)
 echo ""
 echo "== 已啟動 =="
