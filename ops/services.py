@@ -164,13 +164,13 @@ def can(user, action):
 
 def meal_pages(user):
     """餐點系統各角色能進的頁面（依序，第一個是預設首頁）。
-    老闆：外場總控台、廚房、設定；店員：外場總控台、廚房；廚房帳號：只有廚房與點餐。"""
+    老闆：外場總控台、廚房、吧台、設定；店員：外場總控台、廚房、吧台；廚房帳號：廚房、吧台、點餐。"""
     if is_kitchen(user):
-        return ["kitchen", "order"]
+        return ["kitchen", "bar", "order"]
     # 外場總控台已包含點餐、接單、結帳
     if user["role"] == OWNER:
-        return ["floor", "kitchen", "settings"]
-    return ["floor", "kitchen"]
+        return ["floor", "kitchen", "bar", "settings"]
+    return ["floor", "kitchen", "bar"]
 
 
 # ───────────────────────── 品項 ─────────────────────────

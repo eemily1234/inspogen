@@ -5,6 +5,7 @@ from streamlit.testing.v1 import AppTest
 from ops import db, orders as o, services as s
 
 APP = __file__.replace("tests/test_meal_app_smoke.py", "meal_app.py")
+HEAD = open(APP, encoding="utf-8").read().split("# ───────────────────────── 導覽")[0]
 
 
 @pytest.fixture
@@ -157,21 +158,32 @@ def test_selecting_a_table_opens_ordering_on_the_same_page(seeded):
     od = next(x for x in o.open_orders(seeded) if x["table_no"] == "102")
     assert od["guests"] == 2 and [l["name"] for l in od["lines"]] == ["咖哩飯"]
     assert at.session_state["sel"] == {"kind": "table", "key": "102"}       # 留在外場同一桌
-    assert any("已送出到廚房：桌 102" in m.value for m in at.success)
+    assert any("已送出" in m.value and "桌 102" in m.value and "#00" in m.value for m in at.success)
 
 
 def test_dashboard_handles_dishes_checkout_and_takeout_in_one_page(seeded):
     at = run()
-    assert any("今日營收" in m.value and "未結帳" in m.value for m in at.markdown)   # 儀表板數字（老闆）
+    board = next(m.value for m in at.markdown if "class='qboard'" in m.value)             # 叫號看板（取代數字方塊）
+    assert "準備中" in board and "#001" in board and "外帶" in board
     [b for b in at.button if b.key == "pick_101"][0].click().run()
     assert not at.exception, [e.value for e in at.exception]
     md = " ".join(m.value for m in at.markdown)
     assert "第 1 輪" in md and "🕒" in md                                      # 每輪都有時間
     tabs = [t.label for t in at.tabs]
-    for name in ("🍽️ 餐點", "➕ 加點", "💵 結帳", "📣 通知廚房", "🔀 換桌／併桌"):
+    for name in ("🍽️ 餐點", "➕ 加點", "👥 座位", "💵 結帳", "📣 通知", "🔀 換桌"):
         assert name in tabs
     od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
     [b for b in at.button if b.key == f"payall{od['id']}"][0].click().run()  # 同一頁直接結清
+    assert not at.exception, [e.value for e in at.exception]
+    od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
+    assert od["paid_all"] and at.session_state["sel"]["key"] == "101"          # 結清了，但客人還在 → 訂單仍在
+    assert not [b for b in at.button if b.key == f"close{od['id']}"]           # 餐還沒上完 → 不能按完成
+    assert any("客人離開前需要" in c.value and "上完" in c.value for c in at.caption)
+    for _ in range(2):
+        o.advance_ticket(seeded, od["id"], 1)
+    o.serve_all_ready(seeded, od["id"])
+    at.run()
+    [b for b in at.button if b.key == f"close{od['id']}"][0].click().run()     # 👋 客人離開・完成
     assert not at.exception, [e.value for e in at.exception]
     assert not any(x["table_no"] == "101" for x in o.open_orders(seeded))
     assert "sel" not in at.session_state
@@ -181,6 +193,49 @@ def test_dashboard_handles_dishes_checkout_and_takeout_in_one_page(seeded):
     [b for b in at.button if b.key == "send_ocart_takeout"][0].click().run()
     assert not at.exception, [e.value for e in at.exception]
     assert at.session_state["sel"]["kind"] == "order"                         # 送出後直接切到這張外帶單
+
+
+def test_seats_and_who_ordered_what_reach_the_kitchen_screen(seeded):
+    cid = o.add_customer(seeded, "王小姐", avoid="不吃香菜")
+    at = run()
+    [b for b in at.button if b.key == "pick_102"][0].click().run()          # 空桌開桌
+    at.selectbox(key="nseat_c_102_1").set_value(cid).run()                   # 座 1 是熟客
+    at.text_input(key="nseat_n_102_2").set_value("陳先生").run()
+    [b for b in at.button if b.key == "om_ocart_102_1"][0].click().run()   # 咖哩飯
+    uid = at.session_state["ocart_102"][0]["uid"]
+    [b for b in at.button if b.key == f"os{uid}__1"][0].click().run()        # 這道是座 1 點的
+    [b for b in at.button if b.key == "send_ocart_102"][0].click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    line = [t for t in o.kitchen_tickets(seeded) if t["where"] == "桌 102"][0]["lines"][0]
+    assert (line["seat_no"], line["guest"], line["avoid"], line["regular"]) == (1, "王小姐", "不吃香菜", True)
+    seats = {x["seat_no"]: x["guest_name"] for x in o.order_seats(seeded, line and o.open_orders(seeded)[-1]["id"])}
+    assert seats == {1: "王小姐", 2: "陳先生"}
+    k = AppTest.from_string(HEAD + "\nst.session_state.setdefault('user', {'id': 1, 'name': 'x', 'role': 'owner'})"
+                            "\nkitchen_page()\n", default_timeout=30).run()
+    assert not k.exception, [e.value for e in k.exception]
+    md = " ".join(m.value for m in k.markdown)
+    assert "座1 王小姐 ⭐熟客" in md and "不吃：不吃香菜" in md
+
+
+def test_combo_drink_goes_to_bar_page(seeded):
+    o.set_station(seeded, 2, "bar")                                          # 紅茶 → 吧台
+    combo = s.add_item(seeded, "咖哩套餐", "meal", 170)
+    o.set_combo(seeded, combo, [(1, 1), (2, 1)])
+    o.place_order(seeded, "dine_in", [{"item_id": combo, "qty": 1}], table_no="102")
+    bar = AppTest.from_string(HEAD + "\nst.session_state.setdefault('user', {'id': 1, 'name': 'x', 'role': 'owner'})"
+                              "\nbar_page()\n", default_timeout=30).run()
+    assert not bar.exception, [e.value for e in bar.exception]
+    md = " ".join(m.value for m in bar.markdown)
+    assert "1 × 紅茶" in md and "🍱 咖哩套餐" in md and "咖哩飯" not in md.split("目前要準備")[1].split("呼叫外場")[0]
+
+
+def test_settings_page_renders_menu_combos_and_regulars(seeded):
+    o.add_customer(seeded, "王小姐", avoid="不吃香菜")
+    at = AppTest.from_string(HEAD + "\nst.session_state.setdefault('user', {'id': 1, 'name': 'x', 'role': 'owner'})"
+                             "\nsettings_page()\n", default_timeout=30).run()
+    assert not at.exception, [e.value for e in at.exception]
+    assert [t.label for t in at.tabs][:3] == ["桌位", "菜單・套餐", "熟客名單"]
+    assert any("王小姐" in m.value for m in at.markdown)
 
 
 def test_floor_notifies_kitchen_from_the_dashboard(seeded):
@@ -199,8 +254,8 @@ def test_kitchen_shows_prep_summary_and_can_call_floor(seeded):
     prep = next(m.value for m in at.markdown if "class='prep'" in m.value)
     assert "咖哩飯" in prep and "<b>3</b>" in prep                            # 101 兩份 + 外帶一份
     [b for b in at.button if b.label == "請來取餐"][0].click().run()
-    assert [c["message"] for c in o.open_calls(seeded)] == ["請來取餐"]
+    assert [c["message"] for c in o.open_calls(seeded)] == ["請來取餐（廚房）"]
     floor = run()                                                            # 外場看到呼叫並按收到
-    assert any("廚房呼叫：請來取餐" in e.value for e in floor.error)
+    assert any("呼叫外場：請來取餐（廚房）" in e.value for e in floor.error)
     [b for b in floor.button if b.label.startswith("✅ 收到")][0].click().run()
     assert o.open_calls(seeded) == []

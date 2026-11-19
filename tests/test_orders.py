@@ -15,8 +15,24 @@ def conn(tmp_path):
     return c
 
 
-def L(item_id, qty=1, note=None):
-    return {"item_id": item_id, "qty": qty, "note": note}
+def L(item_id, qty=1, note=None, seat=None):
+    return {"item_id": item_id, "qty": qty, "note": note, "seat": seat}
+
+
+def _serve_and_close(conn, order_id):
+    """把這張單的餐全部做完、上完，然後客人離開（訂單完成）。"""
+    for station in ("kitchen", "bar"):
+        while True:
+            ts = [t for t in o.kitchen_tickets(conn, station) if t["order_id"] == order_id]
+            if not ts:
+                break
+            for t in ts:
+                o.advance_ticket(conn, order_id, t["round_no"], station)
+    try:
+        o.serve_all_ready(conn, order_id)
+    except s.OpsError:
+        pass
+    o.close_order(conn, order_id)
 
 
 def test_place_dine_in_order_shows_on_kitchen_with_table_and_notes(conn):
@@ -102,6 +118,8 @@ def test_checkout_writes_sale_and_income_in_one_transaction(conn):
     assert conn.execute("SELECT total FROM sale WHERE id=?", (sale_id,)).fetchone()[0] == 2 * 150 + 40 + 2 * 40
     rep = s.report(conn, date.today(), date.today())
     assert rep["income"] == 420
+    assert o.open_orders(conn)[0]["paid_all"]                           # 結清了，但客人還沒離開 → 訂單仍在
+    _serve_and_close(conn, r["order_id"])
     assert o.open_orders(conn) == []
     assert conn.execute("SELECT COUNT(*) FROM stock_move").fetchone()[0] == 0   # 餐點不扣庫存
     with pytest.raises(s.OpsError):
@@ -118,7 +136,7 @@ def test_checkout_ignores_cancelled_lines_and_empty_fails(conn):
     o.checkout_order(conn, r["order_id"], "現金")
     assert s.report(conn, date.today(), date.today())["income"] == 40
     r2 = o.place_order(conn, "takeout", [L(1)])
-    o.cancel_line(conn, o.open_orders(conn)[0]["lines"][0]["id"])
+    o.cancel_line(conn, next(x for x in o.open_orders(conn) if x["id"] == r2["order_id"])["lines"][0]["id"])
     with pytest.raises(s.OpsError):
         o.checkout_order(conn, r2["order_id"], "現金")
 
@@ -151,6 +169,7 @@ def test_split_checkout_by_items_and_partial_qty(conn):
     assert o.open_orders(conn)[0]["unpaid_total"] == 40
     assert s1 != s2
     o.checkout_order(conn, oid, "現金")                                              # 結清剩下
+    _serve_and_close(conn, oid)
     assert o.open_orders(conn) == []
     assert s.report(conn, date.today(), date.today())["income"] == 530
     assert conn.execute("SELECT COUNT(*) FROM sale WHERE status='done'").fetchone()[0] == 3
@@ -179,6 +198,7 @@ def test_paid_items_cannot_be_cancelled(conn):
         o.cancel_order(conn, oid)
     o.cancel_line(conn, ids["紅茶"])                                                 # 沒付的仍可取消
     o.checkout_order(conn, oid, "現金")
+    _serve_and_close(conn, oid)
     assert o.open_orders(conn) == []
     assert s.report(conn, date.today(), date.today())["income"] == 450
 
@@ -186,7 +206,8 @@ def test_paid_items_cannot_be_cancelled(conn):
 def test_void_split_payment_restores_paid_qty_and_reopens(conn):
     oid, ids = _order(conn)
     s1 = o.checkout_lines(conn, oid, [(ids["咖哩飯"], 3)], "現金")
-    s2 = o.checkout_order(conn, oid, "現金")                                         # 結清 → paid
+    s2 = o.checkout_order(conn, oid, "現金")                                         # 結清
+    _serve_and_close(conn, oid)                                                      # 客人離開 → 完成
     assert o.open_orders(conn) == []
     s.void_sale(conn, s2)                                                            # 作廢第二筆
     od = o.open_orders(conn)[0]
@@ -194,6 +215,7 @@ def test_void_split_payment_restores_paid_qty_and_reopens(conn):
     assert s.report(conn, date.today(), date.today())["income"] == 450
     # 新訂單佔用同桌後，不能再還原舊訂單
     o.checkout_order(conn, oid, "現金")
+    _serve_and_close(conn, oid)
     o.place_order(conn, "dine_in", [L(1)], table_no="A3")
     with pytest.raises(s.OpsError):
         s.void_sale(conn, s1)
@@ -250,6 +272,7 @@ def test_merge_keeps_paid_qty(conn):
     od = o.open_orders(conn)[0]
     assert od["paid_total"] == 40 and od["unpaid_total"] == 150 + 40
     sid = o.checkout_order(conn, a["order_id"], "現金")
+    _serve_and_close(conn, a["order_id"])
     assert o.open_orders(conn) == []
     assert s.report(conn, date.today(), date.today())["income"] == 230
 
@@ -463,3 +486,144 @@ def test_tables_and_orders_carry_open_time(floors):
     assert len(t["opened_at"]) == 19 and t["opened_at"][10] == " "                 # YYYY-MM-DD HH:MM:SS
     line = o.open_orders(floors)[0]["lines"][0]
     assert line["created_at"] and line["round_no"] == 1
+
+
+# ───────────── 結帳 ≠ 完成；客人離開才完成 ─────────────
+def test_paying_does_not_finish_order_until_guests_leave(floors):
+    r = o.place_order(floors, "dine_in", [L(1)], table_no="101", guests=2)
+    oid = r["order_id"]
+    o.checkout_order(floors, oid, "現金")                                           # 先結帳
+    od = o.open_orders(floors)[0]
+    assert od["paid_all"] and not od["can_close"]                                    # 還沒出餐 → 不能完成
+    t = next(x for x in o.floor_overview(floors)["tables"] if x["name"] == "101")
+    assert t["stage"] == "new" and t["paid_all"]                                     # 桌子仍在用，標示已結帳
+    with pytest.raises(s.OpsError, match="還沒上完"):
+        o.close_order(floors, oid)
+    o.advance_ticket(floors, oid, 1); o.advance_ticket(floors, oid, 1)
+    o.serve_all_ready(floors, oid)
+    assert o.open_orders(floors)[0]["can_close"]
+    o.close_order(floors, oid)
+    assert o.open_orders(floors) == []
+    assert next(x for x in o.floor_overview(floors)["tables"] if x["name"] == "101")["stage"] == "empty"
+    with pytest.raises(s.OpsError):
+        o.close_order(floors, oid)
+
+
+def test_cannot_close_with_money_owed_and_addon_after_paying_reopens_bill(floors):
+    r = o.place_order(floors, "dine_in", [L(1)], table_no="101")
+    _serve_all(floors, r["order_id"])
+    with pytest.raises(s.OpsError, match="未結帳"):
+        o.close_order(floors, r["order_id"])
+    o.checkout_order(floors, r["order_id"], "現金")
+    o.place_order(floors, "dine_in", [L(2)], table_no="101")                        # 結帳後又加點 → 同一張單
+    od = o.open_orders(floors)[0]
+    assert od["unpaid_total"] == 40 and not od["paid_all"]
+
+
+def _serve_all(conn, oid):
+    for t in [t for t in o.kitchen_tickets(conn) if t["order_id"] == oid]:
+        o.advance_ticket(conn, oid, t["round_no"]); o.advance_ticket(conn, oid, t["round_no"])
+    o.serve_all_ready(conn, oid)
+
+
+# ───────────── 排隊單號、叫號看板 ─────────────
+def test_queue_numbers_cover_all_order_types_and_board_groups(floors):
+    a = o.place_order(floors, "dine_in", [L(1)], table_no="101")
+    b = o.place_order(floors, "takeout", [L(2)])
+    c = o.place_external_order(floors, "uber", "u-1", [{"name": "咖哩飯", "qty": 1}], label="AB12")
+    o.place_order(floors, "dine_in", [L(2)], table_no="101")                        # 加點不換單號
+    nums = {x["id"]: x["queue"] for x in o.open_orders(floors)}
+    assert [nums[a["order_id"]], nums[b["order_id"]], nums[c["order_id"]]] == ["#001", "#002", "#003"]
+    assert a["queue_no"] == 1 and b["queue_no"] == 2
+    o.advance_ticket(floors, b["order_id"], 1); o.advance_ticket(floors, b["order_id"], 1)   # 外帶做好了
+    board = o.queue_board(floors)
+    assert [x["queue"] for x in board["cooking"]] == ["#001", "#003"]
+    assert [(x["queue"], x["kind"]) for x in board["ready"]] == [("#002", "takeout")]
+    assert board["dining"] == []
+    assert [x["kind"] for x in board["cooking"]] == ["dine_in", "uber"]
+
+
+# ───────────── 座位、誰點什麼、熟客 ─────────────
+def test_seats_guests_and_regulars_reach_the_kitchen(floors):
+    cid = o.add_customer(floors, "王小姐", "0912", avoid="不吃香菜")
+    with pytest.raises(s.OpsError):
+        o.add_customer(floors, "王小姐")
+    r = o.place_order(floors, "dine_in", [L(1, 1, "少辣", seat=1), L(2, 1, seat=2), L(2, 1)], table_no="101",
+                      seats={1: {"customer_id": cid, "avoid": "蝦過敏"}, 2: {"guest_name": "陳先生"}})
+    seats = {x["seat_no"]: x for x in o.open_orders(floors)[0]["seats"]}
+    assert seats[1]["guest_name"] == "王小姐" and seats[1]["avoid"] == "不吃香菜；蝦過敏"   # 熟客忌口自動帶入
+    assert seats[2]["guest_name"] == "陳先生" and seats[2]["avoid"] is None
+    lines = o.kitchen_tickets(floors)[0]["lines"]
+    first = lines[0]
+    assert (first["seat_no"], first["guest"], first["avoid"], first["regular"]) == (1, "王小姐", "不吃香菜；蝦過敏", True)
+    assert (lines[1]["seat_no"], lines[1]["guest"]) == (2, "陳先生")
+    assert lines[2]["seat_no"] is None                                                # 共用
+    o.set_seat(floors, r["order_id"], 3, guest_name="小朋友", avoid="不吃辣")        # 之後補記
+    o.set_seat(floors, r["order_id"], 2)                                             # 全部留白＝清除
+    assert [x["seat_no"] for x in o.order_seats(floors, r["order_id"])] == [1, 3]
+    o.update_customer(floors, cid, avoid="不吃香菜、不吃牛")
+    assert o.get_customer(floors, cid)["avoid"] == "不吃香菜、不吃牛"
+    o.update_customer(floors, cid, active=0)
+    assert o.list_customers(floors) == []
+
+
+# ───────────── 套餐：主餐送廚房、飲料另外送吧台 ─────────────
+@pytest.fixture
+def combo(floors):
+    o.set_station(floors, 2, "bar")                                                  # 紅茶 → 吧台
+    combo_id = s.add_item(floors, "咖哩套餐", "meal", 170)
+    o.set_combo(floors, combo_id, [(1, 1), (2, 1)])
+    return combo_id
+
+
+def test_combo_splits_into_kitchen_and_bar_tickets(floors, combo):
+    r = o.place_order(floors, "dine_in", [{"item_id": combo, "qty": 2, "seat": 1}], table_no="101")
+    k = o.kitchen_tickets(floors, "kitchen")
+    b = o.kitchen_tickets(floors, "bar")
+    assert [(l["name"], l["qty"], l["combo"]) for l in k[0]["lines"]] == [("咖哩飯", 2, "咖哩套餐")]
+    assert [(l["name"], l["qty"], l["combo"]) for l in b[0]["lines"]] == [("紅茶", 2, "咖哩套餐")]
+    assert o.prep_summary(floors, "bar") == [{"name": "紅茶", "new_qty": 2, "preparing_qty": 0, "total": 2}]
+    od = o.open_orders(floors)[0]
+    assert [(l["name"], l["unit_price"], len(l["components"])) for l in od["lines"]] == [("咖哩套餐", 170, 2)]
+    assert od["total"] == 340                                                        # 只算套餐價
+    # 廚房做好主餐、吧台還沒做飲料 → 套餐狀態跟著最慢的走
+    o.advance_ticket(floors, r["order_id"], 1, "kitchen"); o.advance_ticket(floors, r["order_id"], 1, "kitchen")
+    assert o.open_orders(floors)[0]["lines"][0]["status"] == "new"
+    o.advance_ticket(floors, r["order_id"], 1, "bar")
+    assert o.open_orders(floors)[0]["lines"][0]["status"] == "preparing"
+    o.serve_line(floors, od["lines"][0]["id"])                                      # 先上已完成的主餐
+    o.advance_ticket(floors, r["order_id"], 1, "bar")
+    o.serve_all_ready(floors, r["order_id"])
+    assert o.open_orders(floors)[0]["lines"][0]["status"] == "served"
+    o.checkout_order(floors, r["order_id"], "現金")
+    assert s.report(floors, date.today(), date.today())["income"] == 340
+    o.close_order(floors, r["order_id"])
+
+
+def test_combo_cancel_rules_and_validation(floors, combo):
+    r = o.place_order(floors, "dine_in", [{"item_id": combo, "qty": 1}], table_no="101")
+    od = o.open_orders(floors)[0]
+    parent = od["lines"][0]
+    with pytest.raises(s.OpsError, match="整份套餐"):
+        o.cancel_line(floors, parent["components"][0]["id"])
+    o.cancel_line(floors, parent["id"])                                              # 都還沒做 → 可整份取消
+    assert o.kitchen_tickets(floors, "kitchen") == [] and o.kitchen_tickets(floors, "bar") == []
+    r2 = o.place_order(floors, "dine_in", [{"item_id": combo, "qty": 1}], table_no="102")
+    o.advance_ticket(floors, r2["order_id"], 1, "bar")
+    p2 = next(x for x in o.open_orders(floors) if x["id"] == r2["order_id"])["lines"][0]
+    with pytest.raises(s.OpsError, match="開始製作"):
+        o.cancel_line(floors, p2["id"])
+    with pytest.raises(s.OpsError):
+        o.set_combo(floors, combo, [(combo, 1)])                                     # 不能包含自己
+    with pytest.raises(s.OpsError):
+        o.set_combo(floors, 1, [(combo, 1)])                                         # 套餐不能放進套餐
+    with pytest.raises(s.OpsError):
+        o.set_station(floors, 1, "外太空")
+    o.set_combo(floors, combo, [])                                                   # 清空＝變回單點
+    assert o.combo_components(floors, combo) == []
+
+
+def test_floor_can_notify_bar(floors):
+    o.call_kitchen(floors, "飲料先上", "桌 101", station="bar")
+    assert [c["message"] for c in o.open_calls(floors, "to_bar")] == ["飲料先上"]
+    assert o.open_calls(floors, "to_kitchen") == []

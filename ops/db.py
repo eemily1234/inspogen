@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS item (
     cost INTEGER NOT NULL DEFAULT 0 CHECK (cost >= 0),
     safety_stock INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
+    station TEXT NOT NULL DEFAULT 'kitchen',   -- 餐點由誰製作：kitchen 廚房 / bar 吧台
     CHECK ((type = 'meal' AND category = 'meal')
         OR (type = 'product' AND category IN ('health','organic')))
 );
@@ -110,6 +111,8 @@ CREATE TABLE IF NOT EXISTS meal_order (
     sale_id INTEGER REFERENCES sale(id),
     merged_into INTEGER,         -- 併桌：此單已併入的訂單（status 會是 cancelled）
     guests INTEGER,              -- 用餐人數
+    queue_no INTEGER,            -- 當日排隊單號（內用、外帶、Uber 一起編號）
+    closed_at TEXT,              -- 客人離開、訂單完成的時間（結帳不等於完成）
     source TEXT NOT NULL DEFAULT 'pos',   -- 訂單來源：pos（店內）/ uber（Uber Eats）
     external_id TEXT,            -- 外部平台的訂單編號（用來防止重複建單）
     external_label TEXT,         -- 外部平台顯示給人看的短編號
@@ -125,6 +128,10 @@ CREATE TABLE IF NOT EXISTS order_line (
     unit_price INTEGER NOT NULL,           -- 下單當下的價格
     note TEXT,                              -- 特殊需求（少辣、不要香菜…）
     paid_qty INTEGER NOT NULL DEFAULT 0,   -- 已結帳份數（分開結帳）
+    seat_no INTEGER,                        -- 哪個座位點的（空白＝共用）
+    parent_id INTEGER,                      -- 套餐內的品項：指向套餐那一行
+    station TEXT NOT NULL DEFAULT 'kitchen',   -- 由誰製作：kitchen 廚房 / bar 吧台 / combo 套餐本身（不用製作）
+    is_combo INTEGER NOT NULL DEFAULT 0,    -- 1＝套餐（計價用；實際製作的是它底下的品項）
     origin TEXT,                            -- 併桌來源，例：併自 B1
     status TEXT NOT NULL DEFAULT 'new'
         CHECK (status IN ('new','preparing','ready','served','cancelled')),
@@ -150,6 +157,33 @@ CREATE TABLE IF NOT EXISTS external_event (
     received_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS ix_external_event_ext ON external_event(source, external_id);
+
+-- 套餐：一個套餐（item）由哪些品項組成，例如主餐＋飲料
+CREATE TABLE IF NOT EXISTS combo_item (
+    combo_id INTEGER NOT NULL REFERENCES item(id),
+    component_id INTEGER NOT NULL REFERENCES item(id),
+    qty INTEGER NOT NULL DEFAULT 1 CHECK (qty > 0),
+    PRIMARY KEY (combo_id, component_id)
+);
+-- 熟客名單：名字、電話、不吃什麼
+CREATE TABLE IF NOT EXISTS customer (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    phone TEXT,
+    avoid TEXT,                  -- 不吃什麼、過敏
+    note TEXT,                   -- 其他偏好
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+-- 每張訂單的座位：誰坐這裡、不吃什麼（可連到熟客）
+CREATE TABLE IF NOT EXISTS order_seat (
+    order_id INTEGER NOT NULL REFERENCES meal_order(id),
+    seat_no INTEGER NOT NULL,
+    guest_name TEXT,
+    customer_id INTEGER REFERENCES customer(id),
+    avoid TEXT,
+    PRIMARY KEY (order_id, seat_no)
+);
 
 -- 桌位：分樓層，每桌座位數（預設 4 人）
 CREATE TABLE IF NOT EXISTS dining_table (
@@ -221,6 +255,13 @@ MIGRATIONS = [
     ("meal_order", "external_id", "TEXT"),
     ("meal_order", "external_label", "TEXT"),
     ("kitchen_call", "direction", "TEXT NOT NULL DEFAULT 'to_floor'"),
+    ("item", "station", "TEXT NOT NULL DEFAULT 'kitchen'"),
+    ("order_line", "seat_no", "INTEGER"),
+    ("order_line", "parent_id", "INTEGER"),
+    ("order_line", "station", "TEXT NOT NULL DEFAULT 'kitchen'"),
+    ("order_line", "is_combo", "INTEGER NOT NULL DEFAULT 0"),
+    ("meal_order", "queue_no", "INTEGER"),
+    ("meal_order", "closed_at", "TEXT"),
     ("order_line", "paid_qty", "INTEGER NOT NULL DEFAULT 0"),
     ("order_line", "origin", "TEXT"),
 ]

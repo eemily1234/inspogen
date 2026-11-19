@@ -37,11 +37,43 @@ def open_order_for_table(conn, table_no):
     return dict(row) if row else None
 
 
-def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None, today=None,
-                guests=None):
-    """下單。lines = [{"item_id":..,"qty":..,"note":..}, ...]
+def next_queue_no(conn, today=None):
+    """當日排隊單號：內用、外帶、Uber 一起從 1 開始編。"""
+    today = (today or date.today()).isoformat()
+    return conn.execute("SELECT COALESCE(MAX(queue_no),0)+1 FROM meal_order WHERE date(created_at)=?",
+                        (today,)).fetchone()[0]
 
-    回傳 {order_id, round_no, table_no, pickup_no, is_addon}。
+
+def queue_label(no):
+    return f"#{no:03d}" if no else "#—"
+
+
+def _insert_line(conn, order_id, round_no, item, qty, note, seat_no=None):
+    """寫入一個品項。套餐會展開：套餐本身一行（計價），底下每個品項各一行（價格 0，送到各自的廚房／吧台）。"""
+    comps = combo_components(conn, item["id"])
+    if comps:
+        cur = conn.execute(
+            "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note,seat_no,station,is_combo)"
+            " VALUES (?,?,?,?,?,?,?,?,1)", (order_id, round_no, item["id"], qty, item["price"], note, seat_no, "combo"))
+        pid = cur.lastrowid
+        for comp in comps:
+            conn.execute(
+                "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note,seat_no,station,parent_id)"
+                " VALUES (?,?,?,?,0,?,?,?,?)",
+                (order_id, round_no, comp["id"], qty * comp["qty"], note, seat_no, comp["station"], pid))
+    else:
+        conn.execute(
+            "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note,seat_no,station)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (order_id, round_no, item["id"], qty, item["price"], note, seat_no, item["station"]))
+
+
+def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None, today=None,
+                guests=None, seats=None):
+    """下單。lines = [{"item_id":..,"qty":..,"note":..,"seat":座位號或None}, ...]
+    seats = {座位號: {"guest_name", "customer_id", "avoid"}}（誰坐哪裡、不吃什麼；可省略）
+
+    回傳 {order_id, round_no, table_no, pickup_no, queue_no, is_addon}。
     """
     if order_type not in ("dine_in", "takeout"):
         raise OpsError("請選擇內用或外帶")
@@ -73,7 +105,12 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
             raise OpsError(f"「{it['name']}」不是餐點，請改用 POS")
         if not it["active"]:
             raise OpsError(f"「{it['name']}」已停售")
-        clean.append((it, qty, (ln.get("note") or "").strip() or None))
+        seat = ln.get("seat")
+        if seat is not None:
+            seat = int(seat)
+            if not 1 <= seat <= 30:
+                raise OpsError("座位號碼錯誤")
+        clean.append((it, qty, (ln.get("note") or "").strip() or None, seat))
 
     with conn:
         order = None
@@ -83,17 +120,20 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
                 (table_no,)).fetchone()
         pickup_no = None
         if order is None:
+            queue_no = next_queue_no(conn, date.fromisoformat(today))
             if order_type == "takeout":
                 pickup_no = conn.execute(
                     "SELECT COALESCE(MAX(pickup_no),0)+1 FROM meal_order "
                     "WHERE order_type='takeout' AND date(created_at)=?", (today,)).fetchone()[0]
             cur = conn.execute(
-                "INSERT INTO meal_order(order_type,table_no,pickup_no,note,created_by,guests) VALUES (?,?,?,?,?,?)",
-                (order_type, table_no, pickup_no, note, user_id, guests))
+                "INSERT INTO meal_order(order_type,table_no,pickup_no,note,created_by,guests,queue_no)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (order_type, table_no, pickup_no, note, user_id, guests, queue_no))
             order_id, round_no = cur.lastrowid, 1
         else:
             order_id = order["id"]
             pickup_no = order["pickup_no"]
+            queue_no = order["queue_no"]
             round_no = conn.execute(
                 "SELECT COALESCE(MAX(round_no),0)+1 FROM order_line WHERE order_id=?",
                 (order_id,)).fetchone()[0]
@@ -102,12 +142,12 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
                 conn.execute("UPDATE meal_order SET note=? WHERE id=?", (merged, order_id))
             if guests and not order["guests"]:
                 conn.execute("UPDATE meal_order SET guests=? WHERE id=?", (guests, order_id))
-        for it, qty, lnote in clean:
-            conn.execute(
-                "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note) VALUES (?,?,?,?,?,?)",
-                (order_id, round_no, it["id"], qty, it["price"], lnote))
+        for it, qty, lnote, seat in clean:
+            _insert_line(conn, order_id, round_no, it, qty, lnote, seat)
+        for seat_no, info in (seats or {}).items():
+            _save_seat(conn, order_id, int(seat_no), info.get("guest_name"), info.get("customer_id"), info.get("avoid"))
     return {"order_id": order_id, "round_no": round_no, "table_no": table_no,
-            "pickup_no": pickup_no, "is_addon": round_no > 1}
+            "pickup_no": pickup_no, "queue_no": queue_no, "is_addon": round_no > 1}
 
 
 def _where(order):
@@ -122,24 +162,29 @@ def _ticket_status(statuses):
     return min(statuses, key=FLOW.index)
 
 
-def kitchen_tickets(conn):
-    """廚房看板：尚未出餐（新單、製作中）的單，依下單時間由舊到新。
-    一張單 = 同一訂單的同一輪下單。"""
+def kitchen_tickets(conn, station="kitchen"):
+    """廚房（或吧台）看板：尚未出餐（新單、製作中）的單，依下單時間由舊到新。
+    一張單 = 同一訂單的同一輪下單、同一個製作區。每個品項帶著座位、客人、忌口與所屬套餐。"""
     rows = conn.execute(
         """SELECT o.id AS order_id, o.order_type, o.table_no, o.pickup_no, o.note AS order_note,
-                  o.source, o.external_label, o.external_id,
-                  l.id AS line_id, l.round_no, l.qty, l.note, l.origin, l.status, l.created_at, i.name
+                  o.source, o.external_label, o.external_id, o.queue_no,
+                  l.id AS line_id, l.round_no, l.qty, l.note, l.origin, l.status, l.created_at, i.name,
+                  l.seat_no, se.guest_name, se.avoid, se.customer_id, pi.name AS combo_name
            FROM order_line l JOIN meal_order o ON o.id=l.order_id JOIN item i ON i.id=l.item_id
-           WHERE o.status='open' AND l.status IN ('new','preparing')
-           ORDER BY l.created_at, l.id""").fetchall()
+           LEFT JOIN order_seat se ON se.order_id=l.order_id AND se.seat_no=l.seat_no
+           LEFT JOIN order_line p ON p.id=l.parent_id LEFT JOIN item pi ON pi.id=p.item_id
+           WHERE o.status='open' AND l.status IN ('new','preparing') AND l.is_combo=0 AND l.station=?
+           ORDER BY l.created_at, l.id""", (station,)).fetchall()
     tickets = {}
     for r in rows:
         key = (r["order_id"], r["round_no"])
         t = tickets.setdefault(key, {
             "order_id": r["order_id"], "round_no": r["round_no"], "is_addon": r["round_no"] > 1,
             "where": _where(r), "order_note": r["order_note"], "created_at": r["created_at"],
-            "lines": [], "origins": [], "_st": []})
-        t["lines"].append({"line_id": r["line_id"], "name": r["name"], "qty": r["qty"], "note": r["note"]})
+            "queue_no": r["queue_no"], "station": station, "lines": [], "origins": [], "_st": []})
+        t["lines"].append({"line_id": r["line_id"], "name": r["name"], "qty": r["qty"], "note": r["note"],
+                           "seat_no": r["seat_no"], "guest": r["guest_name"], "avoid": r["avoid"],
+                           "regular": bool(r["customer_id"]), "combo": r["combo_name"]})
         t["_st"].append(r["status"])
         if r["origin"] and r["origin"] not in t["origins"]:
             t["origins"].append(r["origin"])
@@ -150,41 +195,68 @@ def kitchen_tickets(conn):
     return out
 
 
-def advance_ticket(conn, order_id, round_no):
-    """廚房：新單 → 製作中 → 完成出餐（待上菜）。"""
+def _sync_combos(conn, order_id):
+    """套餐的狀態跟著它底下的品項走：最慢的那一個是多少，套餐就是多少；全部取消則套餐取消。"""
+    for p in conn.execute("SELECT id FROM order_line WHERE order_id=? AND is_combo=1 AND status!='cancelled'",
+                          (order_id,)).fetchall():
+        sts = [r["status"] for r in conn.execute(
+            "SELECT status FROM order_line WHERE parent_id=? AND status!='cancelled'", (p["id"],))]
+        conn.execute("UPDATE order_line SET status=? WHERE id=?",
+                     (_ticket_status(sts) if sts else "cancelled", p["id"]))
+
+
+def advance_ticket(conn, order_id, round_no, station="kitchen"):
+    """廚房／吧台：新單 → 製作中 → 完成出餐（待上菜）。只動自己這一區的品項。"""
     with conn:
         sts = [r["status"] for r in conn.execute(
-            "SELECT status FROM order_line WHERE order_id=? AND round_no=? AND status IN ('new','preparing')",
-            (order_id, round_no))]
+            "SELECT status FROM order_line WHERE order_id=? AND round_no=? AND station=? AND is_combo=0 "
+            "AND status IN ('new','preparing')", (order_id, round_no, station))]
         if not sts:
             raise OpsError("這張單已處理完成")
         cur = _ticket_status(sts)
         conn.execute(
-            "UPDATE order_line SET status=? WHERE order_id=? AND round_no=? AND status=?",
-            (NEXT[cur], order_id, round_no, cur))
+            "UPDATE order_line SET status=? WHERE order_id=? AND round_no=? AND station=? AND is_combo=0 AND status=?",
+            (NEXT[cur], order_id, round_no, station, cur))
+        _sync_combos(conn, order_id)
     return NEXT[cur]
 
 
 def serve_line(conn, line_id):
-    """服務生：待上菜 → 已上菜。"""
+    """服務生：待上菜 → 已上菜。點套餐＝把套餐裡已完成的品項都上菜。"""
     with conn:
-        row = conn.execute("SELECT status FROM order_line WHERE id=?", (line_id,)).fetchone()
-        if not row or row["status"] != "ready":
-            raise OpsError("這個品項還不能上菜")
-        conn.execute("UPDATE order_line SET status='served' WHERE id=?", (line_id,))
+        row = conn.execute("SELECT * FROM order_line WHERE id=?", (line_id,)).fetchone()
+        if not row:
+            raise OpsError("找不到這個品項")
+        if row["is_combo"]:
+            cur = conn.execute("UPDATE order_line SET status='served' WHERE parent_id=? AND status='ready'", (line_id,))
+            if cur.rowcount == 0:
+                raise OpsError("套餐裡還沒有可以上的品項")
+        else:
+            if row["status"] != "ready":
+                raise OpsError("這個品項還不能上菜")
+            conn.execute("UPDATE order_line SET status='served' WHERE id=?", (line_id,))
+        _sync_combos(conn, row["order_id"])
 
 
 def cancel_line(conn, line_id):
-    """取消品項：只有廚房尚未開始製作（新單）才能取消。"""
+    """取消品項：只有廚房尚未開始製作（新單）才能取消。套餐要整份取消。"""
     with conn:
         row = conn.execute(
-            "SELECT l.status, l.paid_qty, o.status AS ostatus FROM order_line l "
+            "SELECT l.*, o.status AS ostatus FROM order_line l "
             "JOIN meal_order o ON o.id=l.order_id WHERE l.id=?", (line_id,)).fetchone()
         if not row or row["ostatus"] != "open":
             raise OpsError("找不到可取消的品項")
+        if row["parent_id"]:
+            raise OpsError("套餐裡的品項請取消整份套餐")
         if row["paid_qty"]:
             raise OpsError("這個品項已結帳，無法取消")
-        if row["status"] != "new":
+        if row["is_combo"]:
+            started = conn.execute("SELECT COUNT(*) FROM order_line WHERE parent_id=? AND status NOT IN ('new','cancelled')",
+                                   (line_id,)).fetchone()[0]
+            if started:
+                raise OpsError("套餐裡已有品項開始製作，無法取消；請洽廚房或老闆")
+            conn.execute("UPDATE order_line SET status='cancelled' WHERE parent_id=?", (line_id,))
+        elif row["status"] != "new":
             raise OpsError("廚房已開始製作，無法取消；請洽廚房或老闆")
         conn.execute("UPDATE order_line SET status='cancelled' WHERE id=?", (line_id,))
 
@@ -208,24 +280,53 @@ def cancel_order(conn, order_id):
 
 
 def open_orders(conn):
-    """未結帳訂單（服務生／櫃台用），含品項與合計。"""
+    """進行中的訂單（客人還沒離開）：含計價品項（套餐帶著它的組成品項）、座位、合計與狀態。
+    結帳完成不會讓訂單消失；要按「客人離開」(close_order) 才結束。"""
     result = []
     for o in conn.execute("SELECT * FROM meal_order WHERE status='open' ORDER BY id").fetchall():
-        lines = [dict(r) for r in conn.execute(
+        rows = [dict(r) for r in conn.execute(
             "SELECT l.*, i.name FROM order_line l JOIN item i ON i.id=l.item_id "
             "WHERE l.order_id=? ORDER BY l.round_no, l.id", (o["id"],))]
-        active = [l for l in lines if l["status"] != "cancelled"]
+        children = {}
+        for r in rows:
+            if r["parent_id"]:
+                children.setdefault(r["parent_id"], []).append(r)
+        lines = [r for r in rows if not r["parent_id"]]          # 計價品項（一般品項＋套餐）
         for l in lines:
             l["remaining"] = 0 if l["status"] == "cancelled" else l["qty"] - l["paid_qty"]
+            l["components"] = children.get(l["id"], [])
+        active = [l for l in lines if l["status"] != "cancelled"]
+        prep = [r for r in rows if not r["is_combo"] and r["status"] != "cancelled"]   # 實際要製作的品項
+        unpaid = sum(l["remaining"] * l["unit_price"] for l in active)
+        unfinished = sum(1 for r in prep if r["status"] in ("new", "preparing"))
+        to_serve = sum(1 for r in prep if r["status"] == "ready")
         result.append({
-            **dict(o), "where": _where(o), "lines": lines,
+            **dict(o), "where": _where(o), "queue": queue_label(o["queue_no"]), "lines": lines,
+            "seats": order_seats(conn, o["id"]),
             "total": sum(l["qty"] * l["unit_price"] for l in active),
             "paid_total": sum(l["paid_qty"] * l["unit_price"] for l in active),
-            "unpaid_total": sum(l["remaining"] * l["unit_price"] for l in active),
-            "unfinished": sum(1 for l in active if l["status"] in ("new", "preparing")),
-            "to_serve": sum(1 for l in active if l["status"] == "ready"),
+            "unpaid_total": unpaid,
+            "unfinished": unfinished, "to_serve": to_serve,
+            "paid_all": bool(active) and unpaid == 0,
+            "can_close": unpaid == 0 and unfinished == 0 and to_serve == 0,
         })
     return result
+
+
+def close_order(conn, order_id):
+    """客人離開、訂單完成。要全部結清、所有餐點都上完才能完成；桌子才會變回空桌。"""
+    with conn:
+        order = _get_order(conn, order_id)
+        if order["status"] != "open":
+            raise OpsError("這張訂單已經完成或取消")
+        od = next(x for x in open_orders(conn) if x["id"] == order_id)
+        if od["unpaid_total"] > 0:
+            raise OpsError(f"還有 ${od['unpaid_total']} 未結帳")
+        if od["unfinished"] or od["to_serve"]:
+            raise OpsError(f"還有 {od['unfinished'] + od['to_serve']} 道餐點還沒上完")
+        status = "paid" if od["total"] > 0 else "cancelled"
+        conn.execute("UPDATE meal_order SET status=?, closed_at=datetime('now','localtime') WHERE id=?",
+                     (status, order_id))
 
 
 def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=None):
@@ -252,7 +353,7 @@ def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=N
         for line_id, qty in picks.items():
             l = conn.execute(
                 "SELECT l.*, i.cost FROM order_line l JOIN item i ON i.id=l.item_id "
-                "WHERE l.id=? AND l.order_id=?", (line_id, order_id)).fetchone()
+                "WHERE l.id=? AND l.order_id=? AND l.parent_id IS NULL", (line_id, order_id)).fetchone()
             if not l or l["status"] == "cancelled":
                 raise OpsError("品項不存在或已取消")
             if qty > l["qty"] - l["paid_qty"]:
@@ -270,8 +371,8 @@ def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=N
                          (sale_id, order_id, l["id"], qty))
             conn.execute("UPDATE order_line SET paid_qty=paid_qty+? WHERE id=?", (qty, l["id"]))
         left = conn.execute(
-            "SELECT COUNT(*) FROM order_line WHERE order_id=? AND status!='cancelled' AND qty>paid_qty",
-            (order_id,)).fetchone()[0]
+            "SELECT COUNT(*) FROM order_line WHERE order_id=? AND parent_id IS NULL AND status!='cancelled' "
+            "AND qty>paid_qty", (order_id,)).fetchone()[0]
         earlier = conn.execute(
             "SELECT COUNT(*) FROM order_payment_line WHERE order_id=? AND sale_id!=?",
             (order_id, sale_id)).fetchone()[0]
@@ -281,8 +382,8 @@ def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=N
             " VALUES (?,?,?,?,?,?,?,?)",
             (today, "income", total, "pos", "sale", sale_id,
              f"餐點結帳 {_where(order)}（訂單 #{order_id}）{split}", user_id))
-        if left == 0:
-            conn.execute("UPDATE meal_order SET status='paid', sale_id=? WHERE id=?", (sale_id, order_id))
+        # 結清不代表完成：訂單留在外場，等餐點上完、客人離開時按「完成」(close_order)
+        conn.execute("UPDATE meal_order SET sale_id=? WHERE id=?", (sale_id, order_id))
     return sale_id
 
 
@@ -290,7 +391,7 @@ def checkout_order(conn, order_id, pay_method, user_id=None, today=None):
     """結清這張訂單所有尚未結帳的品項。"""
     rows = conn.execute(
         "SELECT id, qty-paid_qty AS rest FROM order_line "
-        "WHERE order_id=? AND status!='cancelled' AND qty>paid_qty", (order_id,)).fetchall()
+        "WHERE order_id=? AND parent_id IS NULL AND status!='cancelled' AND qty>paid_qty", (order_id,)).fetchall()
     if not rows:
         raise OpsError("沒有可結帳的品項")
     return checkout_lines(conn, order_id, [(r["id"], r["rest"]) for r in rows], pay_method, user_id, today)
@@ -422,8 +523,12 @@ def _tile(od, now=None):
         "wait": wait_minutes(od["created_at"], now), "total": od["total"],
         "unpaid_total": od["unpaid_total"], "to_serve": od["to_serve"],
         "counts": {k: sum(1 for l in active if l["status"] == k) for k, _ in STAGES[:3]},
-        # 桌位圖上要畫出的餐點（含狀態），依下單順序
-        "dishes": [{"name": l["name"], "qty": l["qty"], "status": l["status"], "note": l["note"]} for l in active],
+        # 桌位圖上要畫出的餐點（含狀態），依下單順序；套餐帶著組成品項
+        "dishes": [{"name": l["name"], "qty": l["qty"], "status": l["status"], "note": l["note"],
+                    "seat_no": l.get("seat_no"), "components": [c["name"] for c in l.get("components", [])]}
+                   for l in active],
+        "queue_no": od.get("queue_no"), "queue": od.get("queue"), "paid_all": od.get("paid_all"),
+        "can_close": od.get("can_close"), "seats_info": od.get("seats", []),
         "note": od["note"],
         "opened_at": od["created_at"],
     }
@@ -455,10 +560,11 @@ def floor_overview(conn, now=None):
 def serve_all_ready(conn, order_id):
     """服務生一鍵上菜：這張訂單所有「待上菜」品項標為已上菜。回傳份數。"""
     with conn:
-        cur = conn.execute("UPDATE order_line SET status='served' WHERE order_id=? AND status='ready'",
+        cur = conn.execute("UPDATE order_line SET status='served' WHERE order_id=? AND status='ready' AND is_combo=0",
                            (order_id,))
         if cur.rowcount == 0:
             raise OpsError("目前沒有可上的菜")
+        _sync_combos(conn, order_id)
         return cur.rowcount
 
 
@@ -532,8 +638,9 @@ def place_external_order(conn, source, external_id, lines, label=None, note=None
     unmatched = []
     with conn:
         cur = conn.execute(
-            "INSERT INTO meal_order(order_type,note,source,external_id,external_label) VALUES (?,?,?,?,?)",
-            ("takeout", (note or "").strip() or None, source, external_id, (label or "").strip() or None))
+            "INSERT INTO meal_order(order_type,note,source,external_id,external_label,queue_no) VALUES (?,?,?,?,?,?)",
+            ("takeout", (note or "").strip() or None, source, external_id, (label or "").strip() or None,
+             next_queue_no(conn)))
         order_id = cur.lastrowid
         for ln in lines:
             qty = 1 if ln.get("qty") is None else int(ln["qty"])   # 沒填 = 1；明確填 0 或負數要擋下
@@ -544,9 +651,7 @@ def place_external_order(conn, source, external_id, lines, label=None, note=None
             if placeholder:
                 unmatched.append(ln.get("name") or item["name"])
                 lnote = (lnote + "；" if lnote else "") + "未對應菜單，請核對品項與價格"
-            conn.execute(
-                "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note) VALUES (?,?,?,?,?,?)",
-                (order_id, 1, item["id"], qty, item["price"], lnote or None))
+            _insert_line(conn, order_id, 1, item, qty, lnote or None)
     return {"order_id": order_id, "duplicate": False, "unmatched": unmatched}
 
 
@@ -588,16 +693,16 @@ def order_source(conn, order_id):
 
 
 # ───────────────────────── 廚房備料總表 ─────────────────────────
-def prep_summary(conn):
-    """廚房最上方：所有還沒出餐的品項，依品名加總（待接單＋製作中）。份數多的在前。"""
+def prep_summary(conn, station="kitchen"):
+    """廚房（或吧台）最上方：所有還沒出餐的品項，依品名加總（待接單＋製作中）。份數多的在前。"""
     rows = conn.execute(
         """SELECT i.name,
                   SUM(CASE WHEN l.status='new' THEN l.qty ELSE 0 END) AS new_qty,
                   SUM(CASE WHEN l.status='preparing' THEN l.qty ELSE 0 END) AS preparing_qty,
                   SUM(l.qty) AS total
            FROM order_line l JOIN meal_order o ON o.id=l.order_id JOIN item i ON i.id=l.item_id
-           WHERE o.status='open' AND l.status IN ('new','preparing')
-           GROUP BY i.id ORDER BY total DESC, i.name""").fetchall()
+           WHERE o.status='open' AND l.status IN ('new','preparing') AND l.is_combo=0 AND l.station=?
+           GROUP BY i.id ORDER BY total DESC, i.name""", (station,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -608,7 +713,7 @@ KITCHEN_MESSAGES = ["請加快這桌", "客人有過敏，請注意", "客人要
 
 def call_floor(conn, message, table_no=None, user_id=None, direction="to_floor"):
     """呼叫另一邊：預設廚房呼叫外場；direction="to_kitchen" 為外場通知廚房。回傳呼叫編號。"""
-    if direction not in ("to_floor", "to_kitchen"):
+    if direction not in ("to_floor", "to_kitchen", "to_bar"):
         raise OpsError("呼叫方向錯誤")
     message = (message or "").strip()
     if not message:
@@ -621,9 +726,9 @@ def call_floor(conn, message, table_no=None, user_id=None, direction="to_floor")
     return cur.lastrowid
 
 
-def call_kitchen(conn, message, table_no=None, user_id=None):
-    """外場通知廚房（廚房會響鈴、跳出視窗）。"""
-    return call_floor(conn, message, table_no, user_id, direction="to_kitchen")
+def call_kitchen(conn, message, table_no=None, user_id=None, station="kitchen"):
+    """外場通知廚房或吧台（對方會響鈴、跳出視窗）。"""
+    return call_floor(conn, message, table_no, user_id, direction="to_bar" if station == "bar" else "to_kitchen")
 
 
 def open_calls(conn, direction="to_floor"):
@@ -645,3 +750,140 @@ def ack_call(conn, call_id, user_id=None):
             "UPDATE kitchen_call SET acked_by=?, acked_at=datetime('now','localtime') "
             "WHERE id=? AND acked_at IS NULL", (user_id, call_id))
     return cur.rowcount == 1
+
+
+# ───────────────────────── 排隊叫號看板 ─────────────────────────
+QUEUE_GROUPS = [("cooking", "準備中"), ("ready", "可上菜／取餐"), ("dining", "用餐中")]
+
+
+def queue_board(conn):
+    """所有進行中的單（內用、外帶、Uber）依狀態分成三區：準備中、可上菜／取餐、用餐中（含已結帳待離開）。"""
+    groups = {k: [] for k, _ in QUEUE_GROUPS}
+    for od in open_orders(conn):
+        if od["to_serve"]:
+            g = "ready"
+        elif od["unfinished"]:
+            g = "cooking"
+        else:
+            g = "dining"
+        kind = "dine_in" if od["order_type"] == "dine_in" else ("uber" if od["source"] == "uber" else "takeout")
+        groups[g].append({"order_id": od["id"], "queue": od["queue"], "queue_no": od["queue_no"] or 0,
+                          "where": od["where"], "kind": kind, "paid_all": od["paid_all"],
+                          "can_close": od["can_close"], "created_at": od["created_at"]})
+    for g in groups.values():
+        g.sort(key=lambda x: x["queue_no"])
+    return groups
+
+
+# ───────────────────────── 製作區、套餐 ─────────────────────────
+STATIONS = {"kitchen": "廚房", "bar": "吧台"}
+
+
+def set_station(conn, item_id, station):
+    if station not in STATIONS:
+        raise OpsError("製作區只能是廚房或吧台")
+    with conn:
+        conn.execute("UPDATE item SET station=? WHERE id=?", (station, item_id))
+
+
+def combo_components(conn, combo_id):
+    """套餐的組成品項：[{id, name, station, qty}]；不是套餐則回傳空清單。"""
+    return [dict(r) for r in conn.execute(
+        "SELECT i.id, i.name, i.station, c.qty FROM combo_item c JOIN item i ON i.id=c.component_id "
+        "WHERE c.combo_id=? ORDER BY i.station, i.name", (combo_id,))]
+
+
+def set_combo(conn, combo_id, components):
+    """設定套餐內容。components = [(品項 id, 份數), ...]；空清單＝取消套餐設定（變回單點）。"""
+    combo = s.get_item(conn, combo_id)
+    if combo["type"] != "meal":
+        raise OpsError("只有餐點可以設成套餐")
+    clean = {}
+    for cid, qty in components:
+        cid = int(cid)
+        if cid == combo_id:
+            raise OpsError("套餐不能包含自己")
+        comp = s.get_item(conn, cid)
+        if comp["type"] != "meal":
+            raise OpsError(f"「{comp['name']}」不是餐點")
+        if combo_components(conn, cid):
+            raise OpsError(f"「{comp['name']}」本身是套餐，不能再放進套餐")
+        if int(qty) <= 0:
+            raise OpsError("份數需大於 0")
+        clean[cid] = clean.get(cid, 0) + int(qty)
+    with conn:
+        conn.execute("DELETE FROM combo_item WHERE combo_id=?", (combo_id,))
+        for cid, qty in clean.items():
+            conn.execute("INSERT INTO combo_item(combo_id,component_id,qty) VALUES (?,?,?)", (combo_id, cid, qty))
+
+
+# ───────────────────────── 熟客名單、座位 ─────────────────────────
+def add_customer(conn, name, phone=None, avoid=None, note=None):
+    name = (name or "").strip()
+    if not name:
+        raise OpsError("請輸入熟客名字")
+    try:
+        with conn:
+            cur = conn.execute("INSERT INTO customer(name,phone,avoid,note) VALUES (?,?,?,?)",
+                               (name, (phone or "").strip() or None, (avoid or "").strip() or None,
+                                (note or "").strip() or None))
+    except Exception as e:
+        raise OpsError("這個名字已經在熟客名單裡") from e
+    return cur.lastrowid
+
+
+def update_customer(conn, customer_id, **fields):
+    allowed = {k: v for k, v in fields.items() if k in ("name", "phone", "avoid", "note", "active")}
+    if "name" in allowed and not (allowed["name"] or "").strip():
+        raise OpsError("名字不可空白")
+    if allowed:
+        vals = [(v.strip() or None) if isinstance(v, str) else v for v in allowed.values()]
+        with conn:
+            conn.execute(f"UPDATE customer SET {', '.join(k + '=?' for k in allowed)} WHERE id=?",
+                         (*vals, customer_id))
+
+
+def list_customers(conn, active_only=True):
+    q = "SELECT * FROM customer" + (" WHERE active=1" if active_only else "") + " ORDER BY name"
+    return [dict(r) for r in conn.execute(q)]
+
+
+def get_customer(conn, customer_id):
+    row = conn.execute("SELECT * FROM customer WHERE id=?", (customer_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def _save_seat(conn, order_id, seat_no, guest_name=None, customer_id=None, avoid=None):
+    if customer_id:
+        cust = get_customer(conn, customer_id)
+        if not cust:
+            raise OpsError("找不到這位熟客")
+        guest_name = guest_name or cust["name"]
+        if cust["avoid"] and cust["avoid"] not in (avoid or ""):     # 熟客的忌口自動帶入
+            avoid = f"{cust['avoid']}；{avoid}" if avoid else cust["avoid"]
+    guest_name = (guest_name or "").strip() or None
+    avoid = (avoid or "").strip() or None
+    if not guest_name and not avoid and not customer_id:
+        conn.execute("DELETE FROM order_seat WHERE order_id=? AND seat_no=?", (order_id, seat_no))
+        return
+    conn.execute(
+        "INSERT INTO order_seat(order_id,seat_no,guest_name,customer_id,avoid) VALUES (?,?,?,?,?) "
+        "ON CONFLICT(order_id,seat_no) DO UPDATE SET guest_name=excluded.guest_name, "
+        "customer_id=excluded.customer_id, avoid=excluded.avoid",
+        (order_id, seat_no, guest_name, customer_id, avoid))
+
+
+def set_seat(conn, order_id, seat_no, guest_name=None, customer_id=None, avoid=None):
+    """記錄某個座位：誰來用餐（可選熟客）、不吃什麼。全部留白＝清除這個座位的資料。"""
+    if not 1 <= int(seat_no) <= 30:
+        raise OpsError("座位號碼錯誤")
+    with conn:
+        if _get_order(conn, order_id)["status"] != "open":
+            raise OpsError("訂單已結束")
+        _save_seat(conn, order_id, int(seat_no), guest_name, customer_id, avoid)
+
+
+def order_seats(conn, order_id):
+    return [dict(r) for r in conn.execute(
+        "SELECT se.*, c.name AS customer_name FROM order_seat se LEFT JOIN customer c ON c.id=se.customer_id "
+        "WHERE se.order_id=? ORDER BY se.seat_no", (order_id,))]
