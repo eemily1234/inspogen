@@ -53,8 +53,8 @@ def test_addon_goes_to_same_open_order_as_new_round(conn):
 
 
 def test_takeout_pickup_numbers_increment_per_day(conn):
-    a = o.place_order(conn, "takeout", [L(1)], today=date(2026, 11, 4))
-    b = o.place_order(conn, "takeout", [L(1)], today=date(2026, 11, 4))
+    a = o.place_order(conn, "takeout", [L(1)])
+    b = o.place_order(conn, "takeout", [L(1)])
     assert (a["pickup_no"], b["pickup_no"]) == (1, 2)
     assert o.kitchen_tickets(conn)[0]["where"] == "外帶 #1"
 

@@ -247,3 +247,20 @@ def test_device_token_stops_working_when_user_deactivated(conn):
     with conn:
         conn.execute("UPDATE user SET active=0 WHERE id=?", (sid,))
     assert s.user_from_device_token(conn, token) is None
+
+
+def test_reset_pin_changes_pin_and_clears_lockout(conn):
+    _users(conn)
+    t0 = datetime(2026, 11, 4, 12, 0, 0)
+    for i in range(5):
+        s.authenticate(conn, "老闆", "0000", now=t0 + timedelta(seconds=i))
+    with pytest.raises(s.OpsError):
+        s.authenticate(conn, "老闆", "1234", now=t0 + timedelta(minutes=1))     # 被鎖定
+    s.reset_pin(conn, "老闆", "5678")
+    assert s.authenticate(conn, "老闆", "5678", now=t0 + timedelta(minutes=2))  # 鎖定解除、新 PIN 可用
+    assert s.authenticate(conn, "老闆", "1234", now=t0 + timedelta(minutes=2)) is None
+    with pytest.raises(s.OpsError):
+        s.reset_pin(conn, "沒有這人", "5678")
+    with pytest.raises(s.OpsError):
+        s.reset_pin(conn, "老闆", "12")
+    assert [u["name"] for u in s.list_users(conn)] == ["老闆", "小明", "廚房"]

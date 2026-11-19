@@ -131,6 +131,25 @@ def revoke_device_token(conn, token_id):
         conn.execute("UPDATE device_token SET revoked=1 WHERE id=?", (token_id,))
 
 
+def list_users(conn):
+    return [dict(r) for r in conn.execute(
+        "SELECT id, name, role, kitchen FROM user WHERE active=1 ORDER BY id")]
+
+
+def reset_pin(conn, name, new_pin):
+    """忘記 PIN 時重設（只在主機上用 reset_pin.py 執行，不提供網頁入口）。同時解除該帳號的登入鎖定。"""
+    name = (name or "").strip()
+    if not (new_pin or "").isdigit() or len(new_pin) < MIN_PIN_LENGTH:
+        raise OpsError(f"PIN 需為至少 {MIN_PIN_LENGTH} 位數字")
+    row = conn.execute("SELECT id FROM user WHERE name=? AND active=1", (name,)).fetchone()
+    if not row:
+        raise OpsError(f"找不到帳號「{name}」")
+    salt = secrets.token_hex(8)
+    with conn:
+        conn.execute("UPDATE user SET salt=?, pin_hash=? WHERE id=?", (salt, _hash(new_pin, salt), row["id"]))
+        conn.execute("DELETE FROM login_attempt WHERE name=?", (name,))
+
+
 def is_kitchen(user):
     return bool(user.get("kitchen"))
 
