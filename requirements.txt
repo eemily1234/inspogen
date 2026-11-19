@@ -1,3 +1,5 @@
-streamlit
+streamlit>=1.40
 gtts
 requests
+fastapi
+uvicorn

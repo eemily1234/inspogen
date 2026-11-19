@@ -1,0 +1,10 @@
+[server]
+headless = true
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[client]
+# 精簡工具列：隱藏 Deploy 與開發者選單，平板上不會被誤觸
+toolbarMode = "minimal"
