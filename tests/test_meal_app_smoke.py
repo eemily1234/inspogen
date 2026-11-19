@@ -329,3 +329,29 @@ def test_settings_option_editor_renders(seeded):
     st_ = _page("settings_page")
     assert not st_.exception, [e.value for e in st_.exception]
     assert any("份量" in m.value and "大份+20" in m.value for m in st_.markdown)
+
+
+def test_report_lives_in_the_sidebar_for_owner_only(seeded):
+    od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
+    o.checkout_order(seeded, od["id"], "現金")
+    at = run("owner")
+    assert not at.exception, [e.value for e in at.exception]
+    assert any(m.label == "營收（實收）" and "300" in m.value for m in at.sidebar.metric)
+    staff = run("staff")
+    assert not staff.exception and not list(staff.sidebar.metric)                 # 店員看不到報表
+
+
+def test_shift_lives_in_the_sidebar_for_staff_and_owner(seeded):
+    o.open_shift(seeded, 1500, user_id=1)
+    for role in ("owner", "staff"):
+        at = run(role)
+        assert not at.exception, [e.value for e in at.exception]
+        assert any(m.label == "抽屜應有現金" and "1500" in m.value for m in at.sidebar.metric)
+
+
+def test_settings_lives_in_the_sidebar_for_owner_only(seeded):
+    at = run("owner")
+    assert not at.exception, [e.value for e in at.exception]
+    assert any("⚙️ 設定" in m.value for m in at.sidebar.markdown)
+    staff = run("staff")
+    assert not staff.exception and not any("⚙️ 設定" in m.value for m in staff.sidebar.markdown)

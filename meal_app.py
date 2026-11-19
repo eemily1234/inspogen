@@ -175,13 +175,62 @@ def go(page, **state):
     st.rerun()
 
 
+SIDEBAR_PAGES = {"shift", "report", "settings"}   # 交班、報表、設定收在側邊欄，不佔頂端導覽列
+
+
 def top_bar():
-    """頂端導覽列：每頁最上方一排大按鈕（手機也維持同一列），取代 Streamlit 預設導覽。"""
+    """頂端導覽列：每頁最上方一排大按鈕（手機也維持同一列），取代 Streamlit 預設導覽。
+    交班、報表收在左側邊欄（點左上角 » 打開），不佔頂端位置。"""
     if not USE_TOPBAR:
         return
-    cols = st.columns(len(PAGES))
-    for col, pg in zip(cols, PAGES.values()):
+    shown = [pg for k, pg in PAGES.items() if k not in SIDEBAR_PAGES]
+    cols = st.columns(len(shown))
+    for col, pg in zip(cols, shown):
         col.page_link(pg, label=pg.title, icon=pg.icon, use_container_width=True)
+
+
+def sidebar_tools():
+    """側邊欄：交班狀態（店員、老闆）與今日營收摘要（只有老闆），各自連到完整頁面。"""
+    if "shift" in PAGES:
+        with st.sidebar:
+            st.markdown("### 💰 交班")
+            try:
+                sh = orders.current_shift(conn)
+                if sh:
+                    summ = orders.shift_summary(conn, sh["id"])
+                    st.caption(f"🟢 班別進行中（{hhmm(sh['opened_at'])} 開班）")
+                    st.metric("抽屜應有現金", f"＄{summ['expected_cash']}")
+                else:
+                    st.caption("⚪ 目前沒有開班")
+            except Exception:   # 側邊欄只是摘要，出錯不影響主畫面
+                st.caption("交班狀態暫時無法顯示")
+            st.page_link(PAGES["shift"], label="開班／關班", icon="💰", use_container_width=True)
+            st.divider()
+    if "report" in PAGES:
+        _sidebar_report()
+    if "settings" in PAGES:
+        with st.sidebar:
+            st.markdown("### ⚙️ 設定")
+            st.caption("桌位、菜單、套餐、加價選項、售完、熟客")
+            st.page_link(PAGES["settings"], label="打開設定", icon="⚙️", use_container_width=True)
+            st.divider()
+
+
+def _sidebar_report():
+    with st.sidebar:
+        st.markdown("### 📊 今日營業")
+        try:
+            r = orders.sales_report(conn, date.today(), date.today())
+            st.metric("營收（實收）", f"＄{r['revenue']}")
+            c1, c2 = st.columns(2)
+            c1.metric("單數", r["orders"])
+            c2.metric("客單價", f"＄{r['avg_order']}")
+            if r["ranking"]:
+                st.caption("今日熱銷：" + "、".join(f"{x['name']}×{x['qty']}" for x in r["ranking"][:3]))
+        except Exception:   # 側邊欄只是摘要，出錯不影響主畫面
+            st.caption("今日數字暫時無法顯示")
+        st.page_link(PAGES["report"], label="看完整報表", icon="📊", use_container_width=True)
+        st.divider()
 
 
 def kitchen_banner(c):
@@ -1517,4 +1566,5 @@ else:
     if target:   # 目標頁不在權限內（例如廚房帳號送單後想回外場）就回到自己的首頁
         st.switch_page(PAGES.get(target) or PAGES[allowed[0]])
     nav.run()
+    sidebar_tools()
     sidebar_user(user)
