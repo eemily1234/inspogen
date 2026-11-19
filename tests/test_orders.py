@@ -397,3 +397,49 @@ def test_ensure_default_tables_once(conn):
     assert o.ensure_default_tables(conn) is False
     o.setup_tables(conn, {1: 0, 2: 0})
     assert o.ensure_default_tables(conn) is False and o.list_tables(conn) == []   # 不會又被自動建回來
+
+
+# ───────────── 每桌餐點、備料總表、廚房呼叫外場 ─────────────
+def test_floor_tiles_list_each_tables_dishes_with_status(floors):
+    r = o.place_order(floors, "dine_in", [L(1, 2, "少辣"), L(2)], table_no="101", guests=3)
+    o.advance_ticket(floors, r["order_id"], 1)
+    o.place_order(floors, "dine_in", [L(2, 1)], table_no="101")                     # 加點
+    ids = [l["id"] for l in o.open_orders(floors)[0]["lines"]]
+    t = {x["name"]: x for x in o.floor_overview(floors)["tables"]}
+    assert [(d["name"], d["qty"], d["status"]) for d in t["101"]["dishes"]] == [
+        ("咖哩飯", 2, "preparing"), ("紅茶", 1, "preparing"), ("紅茶", 1, "new")]
+    assert t["101"]["dishes"][0]["note"] == "少辣"
+    assert t["102"]["dishes"] == []
+    o.cancel_line(floors, ids[2])                                                    # 取消的不畫出來
+    t = {x["name"]: x for x in o.floor_overview(floors)["tables"]}
+    assert len(t["101"]["dishes"]) == 2
+
+
+def test_prep_summary_totals_unfinished_items_across_orders(floors):
+    a = o.place_order(floors, "dine_in", [L(1, 2), L(2, 1)], table_no="101")
+    o.place_order(floors, "dine_in", [L(1, 3)], table_no="102")
+    o.place_order(floors, "takeout", [L(2, 2)])
+    o.advance_ticket(floors, a["order_id"], 1)                                      # 101 製作中
+    assert o.prep_summary(floors) == [
+        {"name": "咖哩飯", "new_qty": 3, "preparing_qty": 2, "total": 5},
+        {"name": "紅茶", "new_qty": 2, "preparing_qty": 1, "total": 3}]
+    o.advance_ticket(floors, a["order_id"], 1)                                      # 101 出餐 → 不再列入
+    assert o.prep_summary(floors) == [
+        {"name": "咖哩飯", "new_qty": 3, "preparing_qty": 0, "total": 3},
+        {"name": "紅茶", "new_qty": 2, "preparing_qty": 0, "total": 2}]
+
+
+def test_kitchen_calls_floor_and_floor_acknowledges(floors):
+    cid = o.call_floor(floors, "請來取餐", "101", user_id=1)
+    o.call_floor(floors, "需要人手")
+    calls = o.open_calls(floors)
+    assert [(c["message"], c["table_no"]) for c in calls] == [("請來取餐", "101"), ("需要人手", None)]
+    assert o.ack_call(floors, cid, user_id=1) is True
+    assert o.ack_call(floors, cid, user_id=1) is False                               # 重複按不會重記
+    assert [c["message"] for c in o.open_calls(floors)] == ["需要人手"]
+    recent = o.recent_calls(floors)
+    assert recent[1]["id"] == cid and recent[1]["acked_at"] is not None and recent[0]["acked_at"] is None
+    with pytest.raises(s.OpsError):
+        o.call_floor(floors, "  ")
+    with pytest.raises(s.OpsError):
+        o.call_floor(floors, "x" * 101)

@@ -36,8 +36,11 @@ def test_floor_page_renders_with_flow_and_tables(seeded, role):
     assert not at.exception, [e.value for e in at.exception]
     text = " ".join(m.value for m in at.markdown)
     assert "廚房接單中" in text and "待上菜" in text and "flow" in text
+    cards = [m.value for m in at.markdown if "tcard" in m.value]
+    card101 = next(c for c in cards if "aria-label='桌 101'" in c)
+    assert "待接單" in card101 and "2× 咖哩飯" in card101             # 桌子圖示上直接看到這桌的餐點
     labels = [b.label for b in at.button]
-    assert any("101" in l and "待接單" in l for l in labels)          # 桌位格子
+    assert "點餐・查看" in labels and "🍽️ 開桌點餐" in labels
     assert any("外帶" in m.value for m in at.markdown)
 
 
@@ -139,3 +142,34 @@ def test_failed_uber_order_shows_warning_on_floor_and_kitchen(seeded):
 def test_uber_eats_is_a_payment_option():
     from ops.ui import PAY
     assert "Uber Eats" in PAY
+
+
+
+def test_selecting_a_table_opens_ordering_on_the_same_page(seeded):
+    at = run()
+    [b for b in at.button if b.key == "pick_102"][0].click().run()          # 102 是空桌
+    assert not at.exception, [e.value for e in at.exception]
+    assert at.session_state["sel_table"] == "102"
+    assert any("開桌點餐" in h.value for h in at.subheader)
+    [b for b in at.button if b.key == "om_ocart_102_1"][0].click().run()   # 點咖哩飯
+    [b for b in at.button if b.key == "send_ocart_102"][0].click().run()    # 送出
+    assert not at.exception, [e.value for e in at.exception]
+    od = next(x for x in o.open_orders(seeded) if x["table_no"] == "102")
+    assert od["guests"] == 2 and [l["name"] for l in od["lines"]] == ["咖哩飯"]
+    assert at.session_state["sel_table"] == "102"                           # 留在外場同一桌
+    assert any("已送出到廚房：桌 102" in m.value for m in at.success)
+
+
+def test_kitchen_shows_prep_summary_and_can_call_floor(seeded):
+    at = AppTest.from_string(open(APP, encoding="utf-8").read().split("# ───────────────────────── 導覽")[0]
+                             + "\nst.session_state.setdefault('user', {'id': 1, 'name': 'x', 'role': 'owner'})\nkitchen_page()\n",
+                             default_timeout=30).run()
+    assert not at.exception, [e.value for e in at.exception]
+    prep = next(m.value for m in at.markdown if "class='prep'" in m.value)
+    assert "咖哩飯" in prep and "<b>3</b>" in prep                            # 101 兩份 + 外帶一份
+    [b for b in at.button if b.label == "請來取餐"][0].click().run()
+    assert [c["message"] for c in o.open_calls(seeded)] == ["請來取餐"]
+    floor = run()                                                            # 外場看到呼叫並按收到
+    assert any("廚房呼叫：請來取餐" in e.value for e in floor.error)
+    [b for b in floor.button if b.label.startswith("✅ 收到")][0].click().run()
+    assert o.open_calls(seeded) == []

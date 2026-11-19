@@ -422,6 +422,8 @@ def _tile(od, now=None):
         "wait": wait_minutes(od["created_at"], now), "total": od["total"],
         "unpaid_total": od["unpaid_total"], "to_serve": od["to_serve"],
         "counts": {k: sum(1 for l in active if l["status"] == k) for k, _ in STAGES[:3]},
+        # 桌位圖上要畫出的餐點（含狀態），依下單順序
+        "dishes": [{"name": l["name"], "qty": l["qty"], "status": l["status"], "note": l["note"]} for l in active],
         "note": od["note"],
     }
 
@@ -435,7 +437,7 @@ def floor_overview(conn, now=None):
         od = dine.pop(t["name"], None)
         tables.append({**t, "stage": "empty", "order_id": None, "guests": None,
                        "to_serve": 0, "wait": 0, "total": 0, "unpaid_total": 0,
-                       "counts": {}, "note": None, **(_tile(od, now) if od else {})})
+                       "counts": {}, "note": None, "dishes": [], **(_tile(od, now) if od else {})})
     # 沒設定在桌位表的內用單（舊資料或未設定桌位）也要看得到
     for name, od in dine.items():
         tables.append({"id": None, "floor": 0, "name": name, "seats": 4, **_tile(od, now)})
@@ -582,3 +584,55 @@ def external_alerts(conn, source="uber", hours=3):
 def order_source(conn, order_id):
     row = conn.execute("SELECT source, external_id FROM meal_order WHERE id=?", (order_id,)).fetchone()
     return (row["source"], row["external_id"]) if row else (None, None)
+
+
+# ───────────────────────── 廚房備料總表 ─────────────────────────
+def prep_summary(conn):
+    """廚房最上方：所有還沒出餐的品項，依品名加總（待接單＋製作中）。份數多的在前。"""
+    rows = conn.execute(
+        """SELECT i.name,
+                  SUM(CASE WHEN l.status='new' THEN l.qty ELSE 0 END) AS new_qty,
+                  SUM(CASE WHEN l.status='preparing' THEN l.qty ELSE 0 END) AS preparing_qty,
+                  SUM(l.qty) AS total
+           FROM order_line l JOIN meal_order o ON o.id=l.order_id JOIN item i ON i.id=l.item_id
+           WHERE o.status='open' AND l.status IN ('new','preparing')
+           GROUP BY i.id ORDER BY total DESC, i.name""").fetchall()
+    return [dict(r) for r in rows]
+
+
+# ───────────────────────── 廚房呼叫外場 ─────────────────────────
+CALL_MESSAGES = ["請來取餐", "需要人手", "食材不足", "請確認訂單"]
+
+
+def call_floor(conn, message, table_no=None, user_id=None):
+    """廚房呼叫外場。回傳呼叫編號。"""
+    message = (message or "").strip()
+    if not message:
+        raise OpsError("請選擇或輸入要通知外場的內容")
+    if len(message) > 100:
+        raise OpsError("內容請在 100 字以內")
+    with conn:
+        cur = conn.execute("INSERT INTO kitchen_call(message,table_no,created_by) VALUES (?,?,?)",
+                           (message, (table_no or "").strip() or None, user_id))
+    return cur.lastrowid
+
+
+def open_calls(conn):
+    """外場還沒回應的呼叫，舊的在前。"""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM kitchen_call WHERE acked_at IS NULL ORDER BY id")]
+
+
+def recent_calls(conn, limit=5):
+    """廚房看自己最近的呼叫與外場是否已收到。"""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM kitchen_call ORDER BY id DESC LIMIT ?", (limit,))]
+
+
+def ack_call(conn, call_id, user_id=None):
+    """外場按「收到」。已經有人回應過就不重複記錄。回傳 True＝這次回應成功。"""
+    with conn:
+        cur = conn.execute(
+            "UPDATE kitchen_call SET acked_by=?, acked_at=datetime('now','localtime') "
+            "WHERE id=? AND acked_at IS NULL", (user_id, call_id))
+    return cur.rowcount == 1

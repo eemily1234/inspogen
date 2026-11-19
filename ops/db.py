@@ -158,6 +158,17 @@ CREATE TABLE IF NOT EXISTS dining_table (
     name TEXT NOT NULL UNIQUE,   -- 例：101（1 樓第 1 桌）
     seats INTEGER NOT NULL DEFAULT 4
 );
+-- 廚房呼叫外場：廚房按下呼叫 → 外場看到提示 → 外場按「收到」
+CREATE TABLE IF NOT EXISTS kitchen_call (
+    id INTEGER PRIMARY KEY,
+    message TEXT NOT NULL,
+    table_no TEXT,               -- 跟哪一桌／哪張單有關（可空白）
+    created_by INTEGER REFERENCES user(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    acked_by INTEGER REFERENCES user(id),
+    acked_at TEXT
+);
+
 -- 系統設定（例如廚房是否接單）
 CREATE TABLE IF NOT EXISTS setting (
     key TEXT PRIMARY KEY,
