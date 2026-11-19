@@ -282,3 +282,50 @@ def test_kitchen_shows_prep_summary_and_can_call_floor(seeded):
     assert any("呼叫外場：請來取餐（廚房）" in e.value for e in floor.error)
     [b for b in floor.button if b.label.startswith("✅ 收到")][0].click().run()
     assert o.open_calls(seeded) == []
+
+
+def _page(fn):
+    return AppTest.from_string(HEAD + "\nst.session_state.setdefault('user', {'id': 1, 'name': 'x', 'role': 'owner'})"
+                               f"\n{fn}()\n", default_timeout=30).run()
+
+
+def test_sold_out_pad_is_disabled_and_shows_why(seeded):
+    o.set_sold_out(seeded, 1)
+    at = run()
+    press(at, "tbl_empty_", "_102").click().run()
+    pad = press(at, "padk_ocart_102_1")
+    assert pad.disabled and "售完" in pad.label
+    o.set_portions(seeded, 2, 3)
+    at.run()
+    assert "剩 3" in press(at, "padk_ocart_102_2").label
+
+
+def test_kitchen_one_tap_sold_out(seeded):
+    k = _page("kitchen_page")
+    assert not k.exception, [e.value for e in k.exception]
+    press(k, "so_kitchen_1").click().run()
+    assert o.availability(seeded)[1]["ok"] is False
+
+
+def test_shift_and_report_pages(seeded):
+    sh = _page("shift_page")
+    assert not sh.exception, [e.value for e in sh.exception]
+    [b for b in sh.button if "開班" in b.label][0].click().run()
+    assert o.current_shift(seeded)
+    od = next(x for x in o.open_orders(seeded) if x["table_no"] == "101")
+    o.checkout_order(seeded, od["id"], "現金")
+    sh = _page("shift_page")
+    assert any("抽屜應有現金" in m.value and "＄2300" in m.value for m in sh.markdown)    # 2000 + 300
+    sh.number_input(key="close_cash").set_value(2300).run()
+    [b for b in sh.button if "關班" in b.label][0].click().run()
+    assert not sh.exception and o.current_shift(seeded) is None
+    rp = _page("report_page")
+    assert not rp.exception, [e.value for e in rp.exception]
+    assert any("營收（實收）" in m.value and "＄300" in m.value for m in rp.markdown)
+
+
+def test_settings_option_editor_renders(seeded):
+    o.add_option_group(seeded, 1, "份量", "小份-10, 大份+20", required=True)
+    st_ = _page("settings_page")
+    assert not st_.exception, [e.value for e in st_.exception]
+    assert any("份量" in m.value and "大份+20" in m.value for m in st_.markdown)

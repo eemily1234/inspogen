@@ -143,8 +143,10 @@ def handle_event(conn, client, event):
         try:
             res = orders.place_external_order(conn, "uber", parsed["external_id"], parsed["lines"],
                                               parsed["label"], parsed["note"])
-        except orders.KitchenPaused as e:
-            client.deny(ext_id, str(e))
+        except orders.OpsError as e:
+            if not isinstance(e, orders.KitchenPaused) and "售完" not in str(e) and "只剩" not in str(e):
+                raise
+            client.deny(ext_id, str(e))   # 廚房暫停或品項售完 → 向 Uber 拒單
             orders.record_external_event(conn, "uber", ext_id, etype, "denied", str(e), json.dumps(detail, ensure_ascii=False)[:20000])
             return "denied", str(e)
         client.accept(ext_id)

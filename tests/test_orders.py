@@ -682,3 +682,118 @@ def test_gift_rules(conn):
     o.cancel_line(conn, ids["紅茶"])
     with pytest.raises(s.OpsError):
         o.set_gift(conn, ids["紅茶"])                                                # 已取消的不行
+
+
+# ───────────── 一鍵售完、剩餘份數 ─────────────
+def test_sold_out_blocks_ordering_and_restores(floors):
+    o.set_sold_out(floors, 1)
+    assert o.availability(floors)[1] == {"ok": False, "left": None, "why": "售完"}
+    with pytest.raises(s.OpsError, match="已售完"):
+        o.place_order(floors, "dine_in", [L(1)], table_no="101")
+    assert o.open_orders(floors) == []                                              # 整筆不成立
+    o.set_sold_out(floors, 1, False)
+    o.place_order(floors, "dine_in", [L(1)], table_no="101")
+
+
+def test_portions_count_down_auto_sell_out_and_cancel_gives_back(floors):
+    o.set_portions(floors, 1, 3)
+    r = o.place_order(floors, "dine_in", [L(1, 2)], table_no="101")
+    assert o.availability(floors)[1]["left"] == 1
+    with pytest.raises(s.OpsError, match="只剩 1 份"):
+        o.place_order(floors, "dine_in", [L(1, 2)], table_no="102")
+    o.place_order(floors, "dine_in", [L(1, 1)], table_no="102")
+    assert o.availability(floors)[1] == {"ok": False, "left": 0, "why": "售完"}      # 賣到 0 自動售完
+    o.cancel_line(floors, o.open_orders(floors)[0]["lines"][0]["id"])               # 取消 2 份 → 還回去
+    assert o.availability(floors)[1] == {"ok": True, "left": 2, "why": ""}
+    o.set_portions(floors, 1, None)
+    assert o.availability(floors)[1]["left"] is None
+    with pytest.raises(s.OpsError):
+        o.set_portions(floors, 1, -1)
+
+
+def test_combo_unavailable_when_component_sold_out_and_consumes_components(floors):
+    combo = s.add_item(floors, "咖哩套餐", "meal", 170)
+    o.set_combo(floors, combo, [(1, 1), (2, 1)])
+    o.set_portions(floors, 2, 1)                                                     # 紅茶只剩 1 杯
+    assert o.availability(floors)[combo]["left"] == 1
+    o.place_order(floors, "dine_in", [{"item_id": combo, "qty": 1}], table_no="101")
+    assert o.availability(floors)[combo] == {"ok": False, "left": 0, "why": "紅茶售完"}
+    with pytest.raises(s.OpsError, match="紅茶"):
+        o.place_order(floors, "dine_in", [{"item_id": combo, "qty": 1}], table_no="102")
+
+
+# ───────────── 加價選項 ─────────────
+def test_parse_choices():
+    assert o.parse_choices("大份+20, 小份-10，正常、加蛋 + 15") == [("大份", 20), ("小份", -10), ("正常", 0), ("加蛋", 15)]
+    assert o.parse_choices("  ") == []
+
+
+def test_options_change_price_and_reach_the_kitchen(floors):
+    size = o.add_option_group(floors, 1, "份量", "小份-10, 正常, 大份+20", required=True)
+    o.add_option_group(floors, 1, "加料", "加蛋+15, 加起司+20", multi=True)
+    g = {x["name"]: x for x in o.item_options(floors, 1)}
+    cid = {c["name"]: c["id"] for grp in g.values() for c in grp["choices"]}
+    with pytest.raises(s.OpsError, match="請選擇份量"):
+        o.place_order(floors, "dine_in", [L(1)], table_no="101")
+    with pytest.raises(s.OpsError, match="只能選一個"):
+        o.place_order(floors, "dine_in", [{"item_id": 1, "qty": 1, "options": [cid["大份"], cid["小份"]]}], table_no="101")
+    o.place_order(floors, "dine_in", [{"item_id": 1, "qty": 2, "options": [cid["大份"], cid["加蛋"], cid["加起司"]]}],
+                  table_no="101")
+    line = o.open_orders(floors)[0]["lines"][0]
+    assert line["unit_price"] == 150 + 20 + 15 + 20 and line["options"] == "大份(+20)、加蛋(+15)、加起司(+20)"
+    assert o.open_orders(floors)[0]["total"] == 2 * 205
+    assert o.kitchen_tickets(floors)[0]["lines"][0]["options"] == "大份(+20)、加蛋(+15)、加起司(+20)"
+    with pytest.raises(s.OpsError, match="選項不正確"):                              # 別的品項的選項
+        o.place_order(floors, "dine_in", [{"item_id": 2, "qty": 1, "options": [cid["大份"]]}], table_no="102")
+    o.delete_option_group(floors, size)
+    assert [x["name"] for x in o.item_options(floors, 1)] == ["加料"]
+    with pytest.raises(s.OpsError):
+        o.add_option_group(floors, 1, "冰量", "")
+
+
+def test_gift_ignores_option_prices(floors):
+    o.add_option_group(floors, 1, "份量", "大份+20", required=True)
+    big = o.item_options(floors, 1)[0]["choices"][0]["id"]
+    o.place_order(floors, "dine_in", [{"item_id": 1, "qty": 1, "options": [big], "gift": True}], table_no="101")
+    assert o.open_orders(floors)[0]["lines"][0]["unit_price"] == 0
+
+
+# ───────────── 報表 ─────────────
+def test_sales_report(floors):
+    a = o.place_order(floors, "dine_in", [L(1, 2), L(2, 1)], table_no="101", guests=3)     # 340
+    b = o.place_order(floors, "takeout", [L(1, 1), {"item_id": 2, "qty": 1, "gift": True}])  # 150 + 招待紅茶
+    o.checkout_order(floors, a["order_id"], "現金", discount=40, note="熟客")
+    o.checkout_order(floors, b["order_id"], "行動支付")
+    r = o.sales_report(floors, date.today(), date.today())
+    assert (r["revenue"], r["discount"], r["sales"], r["orders"], r["guests"]) == (450, 40, 2, 2, 3)
+    assert r["avg_order"] == 225 and r["gift_value"] == 40 and r["paid_orders"] == 2
+    o.place_order(floors, "dine_in", [L(1)], table_no="102")                       # 還沒結帳的單
+    r2 = o.sales_report(floors, date.today(), date.today())
+    assert r2["orders"] == 3 and r2["avg_order"] == 225                             # 不會把客單價拉低
+    assert r["ranking"][0] == {"name": "咖哩飯", "qty": 3, "amount": 450, "gift_qty": 0}
+    assert {"name": "紅茶", "qty": 2, "amount": 40, "gift_qty": 1} in r["ranking"]
+    assert r["by_pay"] == {"現金": 300, "行動支付": 150}
+    assert sum(r["by_hour"].values()) == 450
+
+
+# ───────────── 交班對帳 ─────────────
+def test_shift_open_close_and_cash_difference(floors):
+    sid = o.open_shift(floors, 2000, user_id=1, now="2026-01-01 00:00:00")
+    with pytest.raises(s.OpsError, match="還沒關"):
+        o.open_shift(floors, 1000)
+    a = o.place_order(floors, "takeout", [L(1, 2)])
+    b = o.place_order(floors, "takeout", [L(2, 1)])
+    o.checkout_order(floors, a["order_id"], "現金")                                  # 300 現金
+    sale_b = o.checkout_order(floors, b["order_id"], "信用卡")                        # 40 刷卡
+    summ = o.shift_summary(floors, sid)
+    assert summ["by_pay"] == {"現金": {"count": 1, "amount": 300}, "信用卡": {"count": 1, "amount": 40}}
+    assert summ["expected_cash"] == 2300 and summ["total"] == 340
+    s.void_sale(floors, sale_b)                                                      # 作廢的不算
+    assert "信用卡" not in o.shift_summary(floors, sid)["by_pay"]
+    res = o.close_shift(floors, 2280, user_id=1, note="找錯零錢")
+    assert (res["expected_cash"], res["counted_cash"], res["diff"]) == (2300, 2280, -20)
+    assert o.current_shift(floors) is None
+    last = o.recent_shifts(floors)[0]
+    assert last["expected_cash"] == 2300 and last["counted_cash"] == 2280 and last["note"] == "找錯零錢"
+    with pytest.raises(s.OpsError):
+        o.close_shift(floors, 0)

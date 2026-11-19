@@ -95,6 +95,8 @@ button[data-baseweb="tab"]{min-height:3rem;font-size:1.15rem;padding:0 1.1rem}
 [class*="st-key-padk_"] button:active,[class*="st-key-padb_"] button:active,[class*="st-key-padc_"] button:active{
  transform:translateY(3px) scale(.97);box-shadow:inset 0 -2px 0 rgba(0,0,0,.25),0 1px 3px rgba(0,0,0,.2)}
 [class*="st-key-padk_"] button p,[class*="st-key-padb_"] button p,[class*="st-key-padc_"] button p{color:#fff;font-size:1rem;line-height:1.25}
+[class*="st-key-padk_"] button:disabled,[class*="st-key-padb_"] button:disabled,[class*="st-key-padc_"] button:disabled{
+ background:#8d939a !important;opacity:.5;box-shadow:none}
 .pad-legend i{display:inline-block;width:.8rem;height:.8rem;border-radius:4px;margin:0 .2rem 0 .5rem;vertical-align:-1px}
 .pad-legend .lk{background:#e5484d}.pad-legend .lb{background:#2f7de1}.pad-legend .lc{background:#7c4dff}
 /* 座位圖：座位（空＝虛線、有人＝暖色、選到＝藍）＋中間的桌子（顏色＝狀態），全部可以點 */
@@ -643,7 +645,8 @@ def _line_label(ln):
     seat = f"座{ln['seat_no']}・" if ln.get("seat_no") else ""
     combo = f"（{'＋'.join(c['name'] for c in ln['components'])}）" if ln.get("components") else ""
     gift = "🎁" if ln.get("gift") else ""
-    return f"{ICON[ln['status']]} {seat}{ln['qty']}× {ln['name']}{gift}{combo}　{orders.LABEL[ln['status']]}"
+    opts = f"［{ln['options']}］" if ln.get("options") else ""
+    return f"{ICON[ln['status']]} {seat}{ln['qty']}× {ln['name']}{opts}{gift}{combo}　{orders.LABEL[ln['status']]}"
 
 
 def _dish_buttons(od):
@@ -852,6 +855,7 @@ def item_dialog(ckey, uid, seat_count, seat_names, seat_avoid):
     try:
         it = s.get_item(c, e["item_id"])
         comps = orders.combo_components(c, it["id"])
+        groups = orders.item_options(c, it["id"])
     finally:
         c.close()
     st.markdown(f"### {it['name']}　＄{it['price']}"
@@ -864,6 +868,32 @@ def item_dialog(ckey, uid, seat_count, seat_names, seat_avoid):
         e["seat"] = choice_buttons(f"os{uid}", list(labels), labels, cols=min(5, len(labels))) or None
         if e["seat"] and seat_avoid.get(e["seat"]):
             st.error(f"🚫 座{e['seat']} {seat_names.get(e['seat']) or ''}：{seat_avoid[e['seat']]}")
+    chosen, delta = [], 0
+    for g in groups:   # 加價選項：單選用大按鈕、多選用標籤；必選的群組預設選第一個
+        lab = {ch["id"]: ch["name"] + (f" +{ch['price_delta']}" if ch["price_delta"] > 0 else
+                                      f" {ch['price_delta']}" if ch["price_delta"] < 0 else "") for ch in g["choices"]}
+        price = {ch["id"]: ch["price_delta"] for ch in g["choices"]}
+        prev = [x for x in e.get("options", []) if x in lab]
+        st.markdown(f"**{g['name']}**" + ("（必選）" if g["required"] else "（可多選）" if g["multi"] else "（可不選）"))
+        key = f"opt{uid}_{g['id']}"
+        if g["multi"]:
+            if hasattr(st, "pills"):
+                picked = st.pills(g["name"], list(lab), selection_mode="multi", format_func=lab.get, default=prev,
+                                  key=key, label_visibility="collapsed") or []
+            else:
+                picked = st.multiselect(g["name"], list(lab), format_func=lab.get, default=prev, key=key)
+            chosen += list(picked)
+        else:
+            opts = ([] if g["required"] else [0]) + list(lab)
+            if key not in st.session_state and prev:
+                st.session_state[key] = prev[0]
+            v = choice_buttons(key, opts, {0: "不用", **lab}, cols=min(4, len(opts)))
+            if v:
+                chosen.append(v)
+        delta += sum(price[x] for x in chosen if x in price)
+    e["options"] = chosen
+    if groups:
+        st.caption(f"單價 ＄{it['price'] + delta}" + (f"（原價 ＄{it['price']}）" if delta else ""))
     st.markdown("**🚫 不吃／過敏**")
     e["avoid"] = quick_pick("不吃／過敏", AVOID_OPTIONS, f"oa{uid}", default=e.get("avoid", []))
     st.markdown("**📝 備註**")
@@ -896,6 +926,9 @@ def order_form(user, otype, table, after="floor", on_placed=None, seat_count=Non
 
     meals = [i for i in s.list_items(conn) if i["type"] == "meal"]
     combos = {i["id"]: orders.combo_components(conn, i["id"]) for i in meals}
+    avail = orders.availability(conn)
+    optmap = {ch["id"]: (ch["name"], ch["price_delta"])
+              for i in meals for g in orders.item_options(conn, i["id"]) for ch in g["choices"]}
     if not meals:
         st.info("還沒有餐點，請老闆到「設定」新增。")
     st.markdown("**按一下就點**　<span class='pad-legend'><i class='lk'></i>廚房 <i class='lb'></i>吧台 "
@@ -909,8 +942,10 @@ def order_form(user, otype, table, after="floor", on_placed=None, seat_count=Non
         for col, it in zip(row, meals[i:i + 4]):
             kind = "c" if combos[it["id"]] else ("b" if it["station"] == "bar" else "k")
             badge = f"×{in_cart[it['id']]}  \n" if it["id"] in in_cart else ""
-            if col.button(f"{badge}{it['name']}  \n＄{it['price']}", key=f"pad{kind}_{ckey}_{it['id']}",
-                          use_container_width=True):
+            a = avail.get(it["id"], {"ok": True, "left": None, "why": ""})
+            state = f"  \n🚫{a['why']}" if not a["ok"] else (f"  \n剩 {a['left']}" if a["left"] is not None else "")
+            if col.button(f"{badge}{it['name']}  \n＄{it['price']}{state}", key=f"pad{kind}_{ckey}_{it['id']}",
+                          use_container_width=True, disabled=not a["ok"]):
                 uid = uuid4().hex[:8]
                 cart.append({"uid": uid, "item_id": it["id"], "qty": 1, "seat": default_seat})
                 st.session_state[f"os{uid}"] = default_seat or 0   # 視窗裡「誰點的」預設選好
@@ -936,7 +971,10 @@ def order_form(user, otype, table, after="floor", on_placed=None, seat_count=Non
         seat = f"座{e['seat']}・" if e.get("seat") else ""
         note = _entry_note(e)
         gift = "　🎁招待" if e.get("gift") else ""
-        price = 0 if e.get("gift") else it["price"] * qty
+        opts = [optmap[x] for x in e.get("options", []) if x in optmap]
+        price = 0 if e.get("gift") else (it["price"] + sum(d for _, d in opts)) * qty
+        if opts:
+            note = "、".join(n for n, _ in opts) + ("；" + note if note else "")
         c1, c2, c3 = st.columns([5, 1, 1])
         c1.markdown(f"{seat}**{qty}× {it['name']}**　＄{price}{gift}" + (f"  \n:red[{note}]" if note else ""))
         if c2.button("✏️", key=f"ed{e['uid']}", use_container_width=True, help="修改不吃／備註／份數"):
@@ -954,7 +992,7 @@ def order_form(user, otype, table, after="floor", on_placed=None, seat_count=Non
     st.markdown(f"### 本次合計　＄{total}")
     if st.button("📨 送出", type="primary", use_container_width=True, disabled=not accepting, key=f"send_{ckey}"):
         lines = [{"item_id": e["item_id"], "qty": e.get("qty", 1), "seat": e.get("seat"), "gift": e.get("gift", False),
-                  "note": _entry_note(e)} for e in cart]
+                  "options": e.get("options", []), "note": _entry_note(e)} for e in cart]
         used = {ln["seat"] for ln in lines if ln["seat"]} | {int(n) for n in pending}
         try:
             r = orders.place_order(conn, otype, lines, table, order_note, user["id"],
@@ -1038,6 +1076,8 @@ def _line_md(ln, big=True):
         extra.append(f"座{ln['seat_no']}" + (f" {ln['guest']}" if ln.get("guest") else "") + (" ⭐熟客" if ln.get("regular") else ""))
     if extra:
         out += f"  \n{'　'.join(extra)}"
+    if ln.get("options"):
+        out += f"  \n➕ {ln['options']}"
     if ln.get("avoid"):
         out += f"  \n:red[🚫 不吃：{ln['avoid']}]"
     if ln.get("note"):
@@ -1129,6 +1169,33 @@ def _station_board(station):
                     orders.set_kitchen_accepting(c, True)
                     st.rerun()
 
+        with st.expander(f"🚫 售完管理（{name}）：一按就售完，外場馬上不能點"):
+            avail = orders.availability(c)
+            mine = [i for i in s.list_items(c) if i["type"] == "meal" and i["station"] == station
+                    and not orders.combo_components(c, i["id"])]
+            if not mine:
+                st.caption(f"沒有由{name}製作的品項")
+            for it in mine:
+                a = avail[it["id"]]
+                c1, c2, c3 = st.columns([3, 2, 2])
+                c1.markdown(f"**{it['name']}**　" + ("🚫 售完" if not a["ok"] else
+                                                       f"剩 {a['left']} 份" if a["left"] is not None else "供應中"))
+                if a["ok"]:
+                    if c2.button("🚫 售完", key=f"so_{station}_{it['id']}", use_container_width=True):
+                        orders.set_sold_out(c, it["id"], True)
+                        st.rerun()
+                elif c2.button("✅ 恢復", key=f"so_{station}_{it['id']}", type="primary", use_container_width=True):
+                    orders.set_sold_out(c, it["id"], False)
+                    st.rerun()
+                with c3.popover("剩幾份", use_container_width=True):
+                    n = st.number_input("今天還剩幾份", 0, 999, a["left"] or 0, key=f"pl_{station}_{it['id']}")
+                    if st.button("設定", key=f"pls_{station}_{it['id']}", use_container_width=True):
+                        orders.set_portions(c, it["id"], n)
+                        st.rerun()
+                    if st.button("不限份數", key=f"plu_{station}_{it['id']}", use_container_width=True):
+                        orders.set_portions(c, it["id"], None)
+                        st.rerun()
+
         prep = orders.prep_summary(c, station)
         st.markdown("### 📋 目前要準備")
         if prep:
@@ -1215,6 +1282,91 @@ def bar_page():
     _station_page("bar", "🍹 吧台")
 
 
+# ───────────────────────── 交班對帳 ─────────────────────────
+def shift_page():
+    top_bar()
+    st.header("💰 交班對帳")
+    msg_box = st.container()
+    if msg := st.session_state.pop("last_order", None):
+        msg_box.success(msg)
+    user = st.session_state.user
+    sh = orders.current_shift(conn)
+    if not sh:
+        st.info("目前沒有開班。開班時先點一下抽屜裡的零用金。")
+        cash = st.number_input("零用金（抽屜裡的現金）", 0, 1_000_000, 2000, step=100, key="open_cash")
+        if st.button("🟢 開班", type="primary", use_container_width=True):
+            try:
+                orders.open_shift(conn, cash, user["id"])
+                st.session_state["last_order"] = f"已開班，零用金 ＄{cash}"
+                st.rerun()
+            except s.OpsError as e:
+                st.error(str(e))
+    else:
+        summ = orders.shift_summary(conn, sh["id"])
+        st.markdown(f"🟢 **班別進行中**　🕒 {hhmm(summ['opened_at'])} 開班")
+        st.markdown(kpi_html([("零用金", f"＄{summ['opening_cash']}"), ("現金收入", f"＄{summ['cash_sales']}"),
+                              ("抽屜應有現金", f"＄{summ['expected_cash']}"), ("本班總收入", f"＄{summ['total']}")]),
+                    unsafe_allow_html=True)
+        if summ["by_pay"]:
+            st.markdown("**各付款方式**")
+            for pay, v in summ["by_pay"].items():
+                st.markdown(f"- {pay}：{v['count']} 筆　＄{v['amount']}")
+        st.caption("包含外場結帳與後台 POS 的收入；作廢的不算。")
+        counted = st.number_input("實際點收的現金", 0, 10_000_000, summ["expected_cash"], step=10, key="close_cash")
+        diff = counted - summ["expected_cash"]
+        if diff:
+            st.warning(f"差額 ＄{diff:+d}（{'多' if diff > 0 else '少'} ＄{abs(diff)}）")
+        note = st.text_input("備註（差額原因等）", key="close_note")
+        if st.button("🔴 關班", type="primary", use_container_width=True):
+            try:
+                r = orders.close_shift(conn, counted, user["id"], note)
+                d = r["diff"]
+                st.session_state["last_order"] = (f"已關班：應有 ＄{r['expected_cash']}，點收 ＄{r['counted_cash']}，"
+                                                  + ("帳款相符 ✅" if d == 0 else f"差額 ＄{d:+d}"))
+                for k in ("close_cash", "close_note"):
+                    st.session_state.pop(k, None)
+                st.rerun()
+            except s.OpsError as e:
+                st.error(str(e))
+    hist = [x for x in orders.recent_shifts(conn) if x["closed_at"]]
+    if hist:
+        st.subheader("最近的班")
+        for x in hist:
+            d = x["counted_cash"] - x["expected_cash"]
+            st.markdown(f"{x['opened_at'][5:16]} → {x['closed_at'][11:16]}　應有 ＄{x['expected_cash']}　點收 ＄{x['counted_cash']}　"
+                        + ("✅ 相符" if d == 0 else f"⚠️ 差 ＄{d:+d}") + (f"　（{x['note']}）" if x["note"] else ""))
+
+
+# ───────────────────────── 報表（老闆） ─────────────────────────
+def report_page():
+    top_bar()
+    st.header("📊 營業報表")
+    c1, c2 = st.columns(2)
+    start = c1.date_input("從", date.today(), key="rp_start")
+    end = c2.date_input("到", date.today(), key="rp_end")
+    r = orders.sales_report(conn, start, end)
+    st.markdown(kpi_html([("營收（實收）", f"＄{r['revenue']}"), ("單數", f"{r['orders']} 單"),
+                          ("客單價", f"＄{r['avg_order']}"), ("來客數", f"{r['guests']} 人"),
+                          ("折扣", f"＄{r['discount']}"), ("招待", f"＄{r['gift_value']}")]), unsafe_allow_html=True)
+    st.subheader("🏆 餐點排行")
+    if r["ranking"]:
+        st.dataframe([{"品項": x["name"], "份數": x["qty"], "金額": x["amount"], "招待份數": x["gift_qty"]}
+                      for x in r["ranking"]], use_container_width=True, hide_index=True)
+    else:
+        st.caption("這段期間沒有點餐")
+    st.subheader("🕒 各時段營收")
+    if r["by_hour"]:
+        st.bar_chart({"時段": [f"{h:02d}時" for h in r["by_hour"]], "營收": list(r["by_hour"].values())},
+                     x="時段", y="營收")
+    else:
+        st.caption("這段期間沒有結帳")
+    st.subheader("💳 付款方式")
+    for pay, amt in r["by_pay"].items():
+        st.markdown(f"- {pay}：＄{amt}")
+    st.caption("營收＝餐點結帳的實收金額（已扣折扣、不含作廢）；客單價＝營收 ÷ 有結帳的單數；"
+               "招待＝招待品項以原價計算的金額。")
+
+
 # ───────────────────────── 設定（老闆）：桌位、菜單、套餐、熟客 ─────────────────────────
 def settings_page():
     top_bar()
@@ -1282,7 +1434,34 @@ def settings_page():
                             st.rerun()
                         except s.OpsError as e:
                             st.error(str(e))
-                if st.button("恢復販售" if not it["active"] else "停售", key=f"ma{it['id']}", use_container_width=True):
+                with st.expander("➕ 加價選項（份量、加料、冰量甜度…）"):
+                    for g in orders.item_options(conn, it["id"]):
+                        g1, g2 = st.columns([4, 1])
+                        g1.markdown(f"**{g['name']}**" + ("（必選）" if g["required"] else "") + ("（可多選）" if g["multi"] else "")
+                                    + "  \n" + "、".join(ch["name"] + (f"+{ch['price_delta']}" if ch["price_delta"] > 0 else
+                                                                      f"{ch['price_delta']}" if ch["price_delta"] < 0 else "")
+                                                         for ch in g["choices"]))
+                        if g2.button("刪除", key=f"og_del{g['id']}", use_container_width=True):
+                            orders.delete_option_group(conn, g["id"])
+                            st.rerun()
+                    with st.form(f"og_new{it['id']}", clear_on_submit=True):
+                        gname = st.text_input("群組名稱", placeholder="例：份量、加料、冰量、甜度")
+                        gchoices = st.text_input("選項（用逗號分隔，加價寫 +數字）", placeholder="例：小份-10, 正常, 大份+20")
+                        r1, r2 = st.columns(2)
+                        req = r1.checkbox("必選")
+                        multi = r2.checkbox("可多選")
+                        if st.form_submit_button("新增選項群組", use_container_width=True):
+                            try:
+                                orders.add_option_group(conn, it["id"], gname, gchoices, required=req, multi=multi)
+                                st.rerun()
+                            except s.OpsError as e:
+                                st.error(str(e))
+                b1, b2 = st.columns(2)
+                sold = bool(it.get("sold_out"))
+                if b1.button("✅ 恢復供應" if sold else "🚫 今日售完", key=f"msold{it['id']}", use_container_width=True):
+                    orders.set_sold_out(conn, it["id"], not sold)
+                    st.rerun()
+                if b2.button("恢復販售" if not it["active"] else "下架（停售）", key=f"ma{it['id']}", use_container_width=True):
                     s.update_item(conn, it["id"], active=0 if it["active"] else 1)
                     st.rerun()
     with t3:
@@ -1320,8 +1499,9 @@ else:
     orders.ensure_default_tables(conn)   # 第一次使用：1 樓 4 桌、2 樓 4 桌，每桌 4 人
     # 依帳號角色只註冊能進的頁面：廚房帳號只有「廚房、吧台、點餐」，網址手動輸入其他頁也進不去
     ALL_PAGES = {
-        "floor": (floor_page, "外場總控台", "🗺️"), "order": (order_page, "點餐", "🍽️"),
+        "floor": (floor_page, "外場", "🗺️"), "order": (order_page, "點餐", "🍽️"),
         "kitchen": (kitchen_page, "廚房", "👨‍🍳"), "bar": (bar_page, "吧台", "🍹"),
+        "shift": (shift_page, "交班", "💰"), "report": (report_page, "報表", "📊"),
         "settings": (settings_page, "設定", "⚙️"),
     }
     allowed = s.meal_pages(user)

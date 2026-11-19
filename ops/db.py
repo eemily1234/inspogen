@@ -46,6 +46,8 @@ CREATE TABLE IF NOT EXISTS item (
     safety_stock INTEGER NOT NULL DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
     station TEXT NOT NULL DEFAULT 'kitchen',   -- 餐點由誰製作：kitchen 廚房 / bar 吧台
+    sold_out INTEGER NOT NULL DEFAULT 0,       -- 1＝手動標成售完
+    portions_left INTEGER,                     -- 今天還剩幾份（空白＝不限；賣到 0 自動售完）
     CHECK ((type = 'meal' AND category = 'meal')
         OR (type = 'product' AND category IN ('health','organic')))
 );
@@ -135,6 +137,8 @@ CREATE TABLE IF NOT EXISTS order_line (
     station TEXT NOT NULL DEFAULT 'kitchen',   -- 由誰製作：kitchen 廚房 / bar 吧台 / combo 套餐本身（不用製作）
     is_combo INTEGER NOT NULL DEFAULT 0,    -- 1＝套餐（計價用；實際製作的是它底下的品項）
     gift INTEGER NOT NULL DEFAULT 0,        -- 1＝招待／贈品（不收錢）
+    options TEXT,                           -- 選了哪些加價選項（例：大份(+20)、加蛋(+15)）
+    option_ids TEXT,                        -- 選項編號（逗號分隔，取消時用來對帳）
     origin TEXT,                            -- 併桌來源，例：併自 B1
     status TEXT NOT NULL DEFAULT 'new'
         CHECK (status IN ('new','preparing','ready','served','cancelled')),
@@ -168,6 +172,35 @@ CREATE TABLE IF NOT EXISTS combo_item (
     qty INTEGER NOT NULL DEFAULT 1 CHECK (qty > 0),
     PRIMARY KEY (combo_id, component_id)
 );
+-- 加價選項：每個品項可有多個選項群組（例：份量 必選單選；加料 可多選），每個選項可加減價
+CREATE TABLE IF NOT EXISTS option_group (
+    id INTEGER PRIMARY KEY,
+    item_id INTEGER NOT NULL REFERENCES item(id),
+    name TEXT NOT NULL,
+    required INTEGER NOT NULL DEFAULT 0,
+    multi INTEGER NOT NULL DEFAULT 0,
+    sort INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS option_choice (
+    id INTEGER PRIMARY KEY,
+    group_id INTEGER NOT NULL REFERENCES option_group(id),
+    name TEXT NOT NULL,
+    price_delta INTEGER NOT NULL DEFAULT 0,
+    sort INTEGER NOT NULL DEFAULT 0
+);
+-- 交班：開班零用金 → 關班點收現金，系統算出應有金額與差額
+CREATE TABLE IF NOT EXISTS shift (
+    id INTEGER PRIMARY KEY,
+    opened_by INTEGER REFERENCES user(id),
+    opened_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    opening_cash INTEGER NOT NULL DEFAULT 0,
+    closed_by INTEGER REFERENCES user(id),
+    closed_at TEXT,
+    counted_cash INTEGER,
+    expected_cash INTEGER,
+    note TEXT
+);
+
 -- 熟客名單：名字、電話、不吃什麼
 CREATE TABLE IF NOT EXISTS customer (
     id INTEGER PRIMARY KEY,
@@ -267,6 +300,10 @@ MIGRATIONS = [
     ("sale", "discount", "INTEGER NOT NULL DEFAULT 0"),
     ("sale", "note", "TEXT"),
     ("order_line", "gift", "INTEGER NOT NULL DEFAULT 0"),
+    ("item", "sold_out", "INTEGER NOT NULL DEFAULT 0"),
+    ("item", "portions_left", "INTEGER"),
+    ("order_line", "options", "TEXT"),
+    ("order_line", "option_ids", "TEXT"),
     ("meal_order", "closed_at", "TEXT"),
     ("order_line", "paid_qty", "INTEGER NOT NULL DEFAULT 0"),
     ("order_line", "origin", "TEXT"),

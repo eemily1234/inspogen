@@ -167,10 +167,10 @@ def meal_pages(user):
     老闆：外場總控台、廚房、吧台、設定；店員：外場總控台、廚房、吧台；廚房帳號：廚房、吧台、點餐。"""
     if is_kitchen(user):
         return ["kitchen", "bar", "order"]
-    # 外場總控台已包含點餐、接單、結帳
+    # 外場總控台已包含點餐、接單、結帳；交班給收銀的店員與老闆，報表只給老闆
     if user["role"] == OWNER:
-        return ["floor", "kitchen", "bar", "settings"]
-    return ["floor", "kitchen", "bar"]
+        return ["floor", "kitchen", "bar", "shift", "report", "settings"]
+    return ["floor", "kitchen", "bar", "shift"]
 
 
 # ───────────────────────── 品項 ─────────────────────────

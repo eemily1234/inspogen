@@ -138,9 +138,9 @@ def test_kitchen_account_is_locked_to_meal_pages(conn):
     for action in ("pos", "view_stock", "report", "void", "view_cost"):
         assert not s.can(k, action)
     staff = s.create_user(conn, "小明", s.STAFF, "1111") and s.authenticate(conn, "小明", "1111")
-    assert s.meal_pages(staff) == ["floor", "kitchen", "bar"]
+    assert s.meal_pages(staff) == ["floor", "kitchen", "bar", "shift"]
     assert s.can(staff, "pos") and not s.is_kitchen(staff)
-    assert s.meal_pages({"role": s.OWNER}) == ["floor", "kitchen", "bar", "settings"]
+    assert s.meal_pages({"role": s.OWNER}) == ["floor", "kitchen", "bar", "shift", "report", "settings"]
 
 
 def test_kitchen_account_counts_toward_four_user_limit(conn):

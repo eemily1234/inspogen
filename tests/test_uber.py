@@ -221,3 +221,11 @@ def test_combined_webhook_app_mounts_both(server):
     assert client.get("/uber/health").status_code == 200
     body = json.dumps(event("ord-9")).encode()
     assert client.post("/uber/webhook", content=body, headers={"x-uber-signature": sign(body)}).status_code == 200
+
+
+def test_sold_out_item_is_denied_not_failed(conn):
+    o.set_sold_out(conn, 1)                                                         # 咖哩飯售完
+    fc = FakeClient(uber_order())
+    status, note = uber.handle_event(conn, fc, event())
+    assert status == "denied" and "售完" in note
+    assert any(c[0] == "deny" for c in fc.calls) and o.external_alerts(conn) == 0
