@@ -627,3 +627,58 @@ def test_floor_can_notify_bar(floors):
     o.call_kitchen(floors, "飲料先上", "桌 101", station="bar")
     assert [c["message"] for c in o.open_calls(floors, "to_bar")] == ["飲料先上"]
     assert o.open_calls(floors, "to_kitchen") == []
+
+
+# ───────────── 結帳：折扣、優惠備註、招待（贈品） ─────────────
+def test_checkout_with_discount_and_note_records_net_income(conn):
+    r = o.place_order(conn, "dine_in", [L(1, 2), L(2, 1)], table_no="A3")          # 150×2 + 40 = 340
+    sid = o.checkout_order(conn, r["order_id"], "現金", discount=34, note="生日 9 折")
+    sale = conn.execute("SELECT * FROM sale WHERE id=?", (sid,)).fetchone()
+    assert (sale["total"], sale["discount"], sale["note"]) == (306, 34, "生日 9 折")
+    assert s.report(conn, date.today(), date.today())["income"] == 306               # 帳上收入是折扣後
+    led = conn.execute("SELECT note FROM ledger WHERE ref_id=? AND kind='income'", (sid,)).fetchone()[0]
+    assert "折扣 $34" in led and "生日 9 折" in led
+    assert o.open_orders(conn)[0]["paid_all"]                                       # 已結清（份數全付）
+    s.void_sale(conn, sid)                                                            # 作廢以實收金額沖回
+    assert s.report(conn, date.today(), date.today())["income"] == 0
+
+
+def test_discount_bounds_and_presets(conn):
+    r = o.place_order(conn, "takeout", [L(1)])
+    with pytest.raises(s.OpsError):
+        o.checkout_order(conn, r["order_id"], "現金", discount=151)
+    with pytest.raises(s.OpsError):
+        o.checkout_order(conn, r["order_id"], "現金", discount=-1)
+    assert conn.execute("SELECT COUNT(*) FROM sale").fetchone()[0] == 0              # 失敗不入帳
+    assert o.discount_amount(340, "p9") == 34 and o.discount_amount(340, "p85") == 51
+    assert o.discount_amount(345, "p95") == 17                                       # 345×0.95=327.75→328
+    assert o.discount_amount(340, "amount", 50) == 50 and o.discount_amount(340, "amount", 999) == 340
+    assert o.discount_amount(340, "none") == 0
+    with pytest.raises(s.OpsError):
+        o.discount_amount(340, "half")
+
+
+def test_gift_items_are_free_but_still_made_and_recorded(conn):
+    r = o.place_order(conn, "dine_in", [L(1), {"item_id": 2, "qty": 1, "gift": True}], table_no="A3")
+    od = o.open_orders(conn)[0]
+    tea = next(l for l in od["lines"] if l["name"] == "紅茶")
+    assert tea["gift"] == 1 and tea["unit_price"] == 0 and od["total"] == 150        # 招待不收錢
+    assert len(o.kitchen_tickets(conn)[0]["lines"]) == 2                             # 但廚房照做
+    curry = next(l for l in od["lines"] if l["name"] == "咖哩飯")
+    o.set_gift(conn, curry["id"], "熟客招待")                                         # 結帳前改成招待
+    od = o.open_orders(conn)[0]
+    assert od["total"] == 0 and od["unpaid_total"] == 0
+    assert "招待：熟客招待" in next(l for l in od["lines"] if l["name"] == "咖哩飯")["note"]
+    _serve_and_close(conn, r["order_id"])                                            # 全部招待也能完成
+    assert o.open_orders(conn) == []
+
+
+def test_gift_rules(conn):
+    r = o.place_order(conn, "dine_in", [L(1), L(2)], table_no="A3")
+    ids = {l["name"]: l["id"] for l in o.open_orders(conn)[0]["lines"]}
+    o.checkout_lines(conn, r["order_id"], [(ids["咖哩飯"], 1)], "現金")
+    with pytest.raises(s.OpsError, match="已結帳"):
+        o.set_gift(conn, ids["咖哩飯"])
+    o.cancel_line(conn, ids["紅茶"])
+    with pytest.raises(s.OpsError):
+        o.set_gift(conn, ids["紅茶"])                                                # 已取消的不行

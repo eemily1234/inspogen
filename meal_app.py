@@ -82,6 +82,18 @@ button[data-baseweb="tab"]{min-height:3rem;font-size:1.15rem;padding:0 1.1rem}
 .qc-ready .qchip{background:rgba(47,125,225,.16)}
 .qempty{opacity:.5;padding:.2rem}
 .tc-paid{color:#2e9e5b;font-weight:700}
+/* DJ 打碟墊式點餐鍵：方形、厚實、按下會沉下去；顏色＝廚房（橘紅）、吧台（藍）、套餐（紫） */
+[class*="st-key-padk_"] button,[class*="st-key-padb_"] button,[class*="st-key-padc_"] button{
+ aspect-ratio:1/1;min-height:5.6rem;max-height:9.5rem;border-radius:18px;border:0;color:#fff;font-weight:800;
+ box-shadow:inset 0 -6px 0 rgba(0,0,0,.25),0 4px 10px rgba(0,0,0,.18);transition:transform .06s,box-shadow .06s}
+[class*="st-key-padk_"] button{background:linear-gradient(145deg,#ff8a4c,#e5484d)}
+[class*="st-key-padb_"] button{background:linear-gradient(145deg,#4cc3ff,#2f7de1)}
+[class*="st-key-padc_"] button{background:linear-gradient(145deg,#b48cff,#7c4dff)}
+[class*="st-key-padk_"] button:active,[class*="st-key-padb_"] button:active,[class*="st-key-padc_"] button:active{
+ transform:translateY(3px) scale(.97);box-shadow:inset 0 -2px 0 rgba(0,0,0,.25),0 1px 3px rgba(0,0,0,.2)}
+[class*="st-key-padk_"] button p,[class*="st-key-padb_"] button p,[class*="st-key-padc_"] button p{color:#fff;font-size:1rem;line-height:1.25}
+.pad-legend i{display:inline-block;width:.8rem;height:.8rem;border-radius:4px;margin:0 .2rem 0 .5rem;vertical-align:-1px}
+.pad-legend .lk{background:#e5484d}.pad-legend .lb{background:#2f7de1}.pad-legend .lc{background:#7c4dff}
 </style>
 """, unsafe_allow_html=True)
 
@@ -106,11 +118,13 @@ def stepper(key, lo, hi, init=None):
     return st.session_state[key]
 
 
-def quick_pick(label, options, key):
-    """特殊需求：觸控選項；舊版 Streamlit 沒有 pills 時改用多選框。"""
+def quick_pick(label, options, key, default=None):
+    """觸控選項（可多選）；舊版 Streamlit 沒有 pills 時改用多選框。"""
+    default = [x for x in (default or []) if x in options]
     if hasattr(st, "pills"):
-        return list(st.pills(label, options, selection_mode="multi", key=key) or [])
-    return st.multiselect(label, options, key=key)
+        return list(st.pills(label, options, selection_mode="multi", key=key, default=default,
+                             label_visibility="collapsed") or [])
+    return st.multiselect(label, options, key=key, default=default)
 
 
 def _set(key, value):
@@ -262,7 +276,7 @@ def table_card_html(t, selected=False):
     else:
         paid = "　<span class='tc-paid'>💵 已結帳</span>" if t.get("paid_all") else ""
         sub = (f"<b>{t.get('queue') or ''}</b>　🕒{hhmm(t.get('opened_at'))}・{t['guests'] or '-'}/{t['seats']} 人"
-               f"・${t['unpaid_total']}{paid}")
+               f"・＄{t['unpaid_total']}{paid}")
         items = []
         for d in t["dishes"][:5]:
             seat = f"<small>座{d['seat_no']}</small> " if d.get("seat_no") else ""
@@ -397,7 +411,7 @@ def _floor_board():
                 with st.container(border=True):
                     st.markdown(f"**{tk.get('queue') or ''}**　{TILE[tk['stage']]} {icon}**{tk['where']}**　"
                                 f"{orders.STAGE_LABEL[tk['stage']]}　🕒{hhmm(tk['opened_at'])}・⏱{tk['wait']} 分"
-                                f"　${tk['unpaid_total']}{paid}  \n{dishes}")
+                                f"　＄{tk['unpaid_total']}{paid}  \n{dishes}")
                     if st.button("👉 處理中" if chosen else "處理這張單", key=f"pick_o{tk['order_id']}",
                                  type="primary" if chosen else "secondary", use_container_width=True):
                         _select("order", tk["order_id"])
@@ -409,7 +423,8 @@ def _floor_board():
 def _line_label(ln):
     seat = f"座{ln['seat_no']}・" if ln.get("seat_no") else ""
     combo = f"（{'＋'.join(c['name'] for c in ln['components'])}）" if ln.get("components") else ""
-    return f"{ICON[ln['status']]} {seat}{ln['qty']}× {ln['name']}{combo}　{orders.LABEL[ln['status']]}"
+    gift = "🎁" if ln.get("gift") else ""
+    return f"{ICON[ln['status']]} {seat}{ln['qty']}× {ln['name']}{gift}{combo}　{orders.LABEL[ln['status']]}"
 
 
 def _dish_buttons(od):
@@ -425,7 +440,7 @@ def _dish_buttons(od):
         cols = st.columns(2)
         for i, ln in enumerate(lines):
             with cols[i % 2].popover(_line_label(ln), use_container_width=True):
-                st.markdown(f"**{ln['qty']} × {ln['name']}**　${ln['qty'] * ln['unit_price']}"
+                st.markdown(f"**{ln['qty']} × {ln['name']}**　＄{ln['qty'] * ln['unit_price']}"
                             + (f"　座 {ln['seat_no']}" if ln.get("seat_no") else "　共用"))
                 for comp in ln["components"]:
                     st.markdown(f"　{ICON[comp['status']]} {STATION_ICON.get(comp['station'], '')} "
@@ -443,6 +458,10 @@ def _dish_buttons(od):
                 if ready and st.button("🛎️ 上菜", key=f"sv{ln['id']}", type="primary", use_container_width=True):
                     orders.serve_line(conn, ln["id"])
                     st.rerun()
+                if ln["status"] != "cancelled" and not ln["paid_qty"] and not ln["gift"] and st.button(
+                        "🎁 改成招待", key=f"pg{ln['id']}", use_container_width=True):
+                    orders.set_gift(conn, ln["id"])
+                    st.rerun()
                 if ln["status"] != "cancelled" and all_new and not ln["paid_qty"] and st.button(
                         "🗑 取消這道", key=f"cl{ln['id']}", use_container_width=True):
                     try:
@@ -459,54 +478,78 @@ def _dish_buttons(od):
 
 
 def checkout_section(od):
-    """結帳：整單結清、分開結帳（按 ＋ 設定份數）、均分試算。結清後客人還在，按上方「客人離開」才完成。"""
+    """結帳：整單結清或分開結帳（按 ＋ 設定份數）、優惠折扣與備註、招待（贈品）、均分試算。
+    結清後客人還在，按上方「客人離開」才完成。"""
     user = st.session_state.user
+    oid = od["id"]
     picks, pick_total = [], 0
     for ln in od["lines"]:
+        if ln["status"] == "cancelled":
+            continue
+        if ln["gift"]:
+            st.markdown(f"🎁 {ln['qty']}× {ln['name']}　招待（＄0）")
+            continue
         if ln["remaining"] <= 0:
             continue
-        c1, c2 = st.columns([3, 2])
-        c1.markdown(f"{ln['qty']}× {ln['name']}  \n${ln['unit_price']}／份，未付 {ln['remaining']} 份")
+        c1, c2, c3 = st.columns([3, 2, 1])
+        c1.markdown(f"{ln['qty']}× {ln['name']}  \n＄{ln['unit_price']}／份，未付 {ln['remaining']} 份")
         with c2:
             # key 帶上剩餘份數：付款後上限改變，數字自動歸零
             q = stepper(f"pq{ln['id']}_{ln['remaining']}", 0, ln["remaining"], 0)
+        if not ln["paid_qty"] and c3.button("🎁", key=f"gift{ln['id']}", use_container_width=True,
+                                            help="改成招待（贈品，不收錢）"):
+            try:
+                orders.set_gift(conn, ln["id"], st.session_state.get(f"dnote_{oid}", ""))
+                st.session_state["last_order"] = f"已招待：{ln['name']}"
+                st.rerun()
+            except s.OpsError as e:
+                st.error(str(e))
         if q:
             picks.append((ln["id"], q))
             pick_total += q * ln["unit_price"]
-    st.markdown(kpi_html([("合計", f"${od['total']}"), ("已付", f"${od['paid_total']}"),
-                          ("待付", f"${od['unpaid_total']}")]), unsafe_allow_html=True)
-    if od["paid_all"]:
+    st.markdown(kpi_html([("合計", f"＄{od['total']}"), ("已付", f"＄{od['paid_total']}"),
+                          ("待付", f"＄{od['unpaid_total']}")]), unsafe_allow_html=True)
+    if od["paid_all"] or od["unpaid_total"] <= 0:
         st.success("已全部結清。客人用完餐離開時，按上方「👋 客人離開・完成」。")
         return
+
+    st.markdown("**🏷️ 優惠折扣**")
+    presets = {k: label for k, label, _ in orders.DISCOUNT_PRESETS}
+    preset = choice_buttons(f"disc_{oid}", list(presets), presets, cols=3)
+    amount = 0
+    if preset == "amount":
+        amount = st.number_input("折抵金額", 0, od["unpaid_total"], 0, step=10, key=f"damt_{oid}")
+    dnote = st.text_input("優惠備註／贈品說明", key=f"dnote_{oid}", placeholder="例：生日 9 折、熟客優惠、招待甜點")
     st.markdown("**付款方式**")
-    pay = choice_buttons(f"pay_{od['id']}", PAY, cols=2)
+    pay = choice_buttons(f"pay_{oid}", PAY, cols=2)
 
-    def done(msg):
-        st.session_state["last_order"] = msg
-        st.rerun()
+    def pay_button(label_prefix, subtotal, key, do):
+        disc = orders.discount_amount(subtotal, preset, amount) if subtotal else 0
+        due = subtotal - disc
+        detail = f"　（小計 ＄{subtotal} − 折扣 ＄{disc}）" if disc else ""
+        if st.button(f"{label_prefix}　＄{due}{detail}", key=key, use_container_width=True,
+                     type="primary" if key.startswith("payall") else "secondary", disabled=subtotal <= 0):
+            try:
+                sid = do(disc)
+                extra = (f"，折扣 ＄{disc}" if disc else "") + (f"（{dnote.strip()}）" if dnote.strip() else "")
+                st.session_state["last_order"] = f"已收 ＄{due}：{od['where']}（單號 #{sid}）{extra}"
+                st.rerun()
+            except s.OpsError as e:
+                st.error(str(e))
 
-    if st.button(f"💵 全部結清　${od['unpaid_total']}", type="primary", use_container_width=True,
-                 key=f"payall{od['id']}"):
-        try:
-            sid = orders.checkout_order(conn, od["id"], pay, user["id"])
-            done(f"已結清：{od['where']}　${od['unpaid_total']}（單號 #{sid}）。客人離開時記得按「完成」")
-        except s.OpsError as e:
-            st.error(str(e))
-    if st.button(f"💵 只結上面選的份數　${pick_total}", disabled=not picks, use_container_width=True,
-                 key=f"paysome{od['id']}"):
-        try:
-            sid = orders.checkout_lines(conn, od["id"], picks, pay, user["id"])
-            done(f"已結帳 ${pick_total}：{od['where']}（單號 #{sid}）")
-        except s.OpsError as e:
-            st.error(str(e))
+    pay_button("💵 全部結清", od["unpaid_total"], f"payall{oid}",
+               lambda d: orders.checkout_order(conn, oid, pay, user["id"], discount=d, note=dnote))
+    pay_button("💵 只結上面選的份數", pick_total, f"paysome{oid}",
+               lambda d: orders.checkout_lines(conn, oid, picks, pay, user["id"], discount=d, note=dnote))
     with st.expander("🧮 均分試算（只算金額，不入帳）"):
-        n = stepper(f"split_n_{od['id']}", 1, 30, 2)
-        st.write("　".join(f"第{i + 1}位 ${v}" for i, v in enumerate(orders.split_evenly(od["unpaid_total"], n))))
-    if s.can(user, "void") and st.button("取消整張訂單", use_container_width=True, key=f"cancel{od['id']}"):
+        n = stepper(f"split_n_{oid}", 1, 30, 2)
+        st.write("　".join(f"第{i + 1}位 ＄{v}" for i, v in enumerate(orders.split_evenly(od["unpaid_total"], n))))
+    if s.can(user, "void") and st.button("取消整張訂單", use_container_width=True, key=f"cancel{oid}"):
         try:
-            orders.cancel_order(conn, od["id"])
+            orders.cancel_order(conn, oid)
             st.session_state.pop("sel", None)
-            done(f"已取消：{od['where']}")
+            st.session_state["last_order"] = f"已取消：{od['where']}"
+            st.rerun()
         except s.OpsError as e:
             st.error(str(e))
 
@@ -593,7 +636,7 @@ def _close_button(od):
     else:
         need = []
         if od["unpaid_total"] > 0:
-            need.append(f"結清 ${od['unpaid_total']}")
+            need.append(f"結清 ＄{od['unpaid_total']}")
         if od["unfinished"] or od["to_serve"]:
             need.append(f"上完 {od['unfinished'] + od['to_serve']} 道")
         st.caption("👋 客人離開前需要：" + "、".join(need))
@@ -638,7 +681,7 @@ def _workspace():
             st.session_state.pop("sel", None)
             st.rerun()
         stage = orders._stage_of(od)
-        paid = "・💵 已結帳" if od["paid_all"] else f"・待付 ${od['unpaid_total']}"
+        paid = "・💵 已結帳" if od["paid_all"] else f"・待付 ＄{od['unpaid_total']}"
         header(f"{od['queue']}　{TILE[stage]} {od['where']}　{orders.STAGE_LABEL[stage]}",
                f"🕒 {hhmm(od['created_at'])} 開單・⏱ {orders.wait_minutes(od['created_at'])} 分鐘"
                f"{('・' + str(od['guests']) + ' 人') if od.get('guests') else ''}{paid}")
@@ -655,7 +698,8 @@ def _workspace():
         if t:
             with tabs["➕ 加點"]:
                 order_form(user, "dine_in", t["name"], after=None, seat_count=t["seats"],
-                           seat_names={x["seat_no"]: x["guest_name"] for x in od["seats"]})
+                           seat_names={x["seat_no"]: x["guest_name"] for x in od["seats"]},
+                           seat_avoid={x["seat_no"]: x["avoid"] for x in od["seats"] if x["avoid"]})
             with tabs["👥 座位"]:
                 seats_section(od, max(t["seats"], od.get("guests") or 0))
         with tabs["💵 結帳"]:
@@ -670,13 +714,15 @@ def _workspace():
 def floor_page():
     top_bar()
     st.header("🗺️ 外場總控台")
-    if st.session_state.pop("floor_alert", False):
-        floor_alert_dialog()
+    # 提示訊息放在一個固定存在的位置：訊息出現或消失都不會讓下方的分頁重建（不會跳回第一個分頁）
+    msg_box = st.container()
     if msg := st.session_state.pop("last_order", None):
-        st.success(msg)
+        msg_box.success(msg)
     _floor_board()
     _workspace()
     test_bell_button("bell_floor")
+    if st.session_state.pop("floor_alert", False):   # 彈跳視窗放最後，同樣不影響上面的版面
+        floor_alert_dialog()
 
 
 # ───────────────────────── 點餐表單（外場總控台與點餐頁共用） ─────────────────────────
@@ -685,10 +731,70 @@ def kpi_html(items):
         f"<div><span>{html.escape(k)}</span><b>{html.escape(v)}</b></div>" for k, v in items) + "</div>"
 
 
+AVOID_OPTIONS = ["不吃香菜", "不吃蔥", "不吃辣", "不吃牛", "不吃豬", "不吃蛋", "海鮮過敏", "堅果過敏", "素食"]
+
+
+def _sync_entry(e):
+    """份數與「誰點的」存在按鍵狀態裡；顯示或送出前再讀一次，確保跳出視窗裡的選擇一定帶到。"""
+    uid = e["uid"]
+    if f"oq{uid}" in st.session_state:
+        e["qty"] = st.session_state[f"oq{uid}"]
+    if f"os{uid}" in st.session_state:
+        e["seat"] = st.session_state[f"os{uid}"] or None
+    return e
+
+
+def _entry_note(e):
+    """把跳出視窗裡選的不吃、備註、其他文字合成一行，給廚房／吧台看。"""
+    parts = list(e.get("avoid", [])) + list(e.get("quick", []))
+    if (e.get("text") or "").strip():
+        parts.append(e["text"].strip())
+    return "、".join(parts)
+
+
+@st.dialog("📝 這道菜：誰點的、不吃什麼、備註")
+def item_dialog(ckey, uid, seat_count, seat_names, seat_avoid):
+    """按下點餐鍵後立刻跳出：份數、誰點的（會直接提示這位客人不吃什麼）、不吃、備註、招待。"""
+    cart = st.session_state.get(ckey, [])
+    e = next((x for x in cart if x["uid"] == uid), None)
+    if not e:
+        st.write("這道已經移除了。")
+        return
+    # 視窗在點選後會單獨重跑（不同執行緒），要用自己的資料庫連線
+    c = db.connect()
+    try:
+        it = s.get_item(c, e["item_id"])
+        comps = orders.combo_components(c, it["id"])
+    finally:
+        c.close()
+    st.markdown(f"### {it['name']}　＄{it['price']}"
+                + (f"  \n🍱 套餐：{'＋'.join(c['name'] for c in comps)}" if comps else ""))
+    e["qty"] = stepper(f"oq{uid}", 1, 99, e.get("qty", 1))
+    if seat_count:
+        labels = {0: "共用"}
+        labels.update({n: f"座{n}" + (f" {seat_names[n]}" if seat_names.get(n) else "") for n in range(1, seat_count + 1)})
+        st.markdown("**誰點的？**")
+        e["seat"] = choice_buttons(f"os{uid}", list(labels), labels, cols=min(5, len(labels))) or None
+        if e["seat"] and seat_avoid.get(e["seat"]):
+            st.error(f"🚫 座{e['seat']} {seat_names.get(e['seat']) or ''}：{seat_avoid[e['seat']]}")
+    st.markdown("**🚫 不吃／過敏**")
+    e["avoid"] = quick_pick("不吃／過敏", AVOID_OPTIONS, f"oa{uid}", default=e.get("avoid", []))
+    st.markdown("**📝 備註**")
+    e["quick"] = quick_pick("備註", QUICK_NOTES, f"on{uid}", default=e.get("quick", []))
+    e["text"] = st.text_input("其他", value=e.get("text", ""), key=f"ot_{uid}", placeholder="例：醬分開、飯少一點")
+    e["gift"] = st.toggle("🎁 招待（贈品，不收錢）", value=e.get("gift", False), key=f"og{uid}")
+    c1, c2 = st.columns(2)
+    if c1.button("✅ 好了", type="primary", use_container_width=True, key=f"ok{uid}"):
+        st.rerun()
+    if c2.button("🗑 不要這道", use_container_width=True, key=f"rm{uid}"):
+        cart.remove(e)
+        st.rerun()
+
+
 def order_form(user, otype, table, guests_seats=None, after="floor", on_placed=None, seat_count=None,
-               seat_names=None):
-    """點餐表單。每桌（或外帶）有自己的購物車，換桌不會混在一起。
-    seat_count：可指定每道菜是哪個座位點的；guests_seats：開桌時選人數並登記誰來用餐。
+               seat_names=None, seat_avoid=None):
+    """點餐：DJ 打碟墊式的大方塊，按一下直接加入，並立刻跳出「誰點的、不吃什麼、備註」視窗。
+    每桌（或外帶）有自己的購物車，換桌不會混在一起。
     after=None：送出後留在原頁；否則送出後換到該頁。on_placed(r)：送出成功時呼叫。"""
     accepting = orders.kitchen_status(conn)["accepting"]
     if not accepting:
@@ -697,6 +803,7 @@ def order_form(user, otype, table, guests_seats=None, after="floor", on_placed=N
     cart = st.session_state.setdefault(ckey, [])
     gkey = f"guests_{table}"
     seat_names = dict(seat_names or {})
+    seat_avoid = dict(seat_avoid or {})
     seats_info = {}
     if guests_seats:
         st.markdown("**用餐人數**")
@@ -713,53 +820,70 @@ def order_form(user, otype, table, guests_seats=None, after="floor", on_placed=N
                 if cid or name.strip() or avoid.strip():
                     seats_info[n] = {"customer_id": cid or None, "guest_name": name, "avoid": avoid}
                     seat_names[n] = name.strip() or (cmap[cid]["name"] if cid else "")
+                    known = "；".join(x for x in ((cmap[cid]["avoid"] if cid else None), avoid.strip()) if x)
+                    if known:
+                        seat_avoid[n] = known
 
     meals = [i for i in s.list_items(conn) if i["type"] == "meal"]
     combos = {i["id"]: orders.combo_components(conn, i["id"]) for i in meals}
     if not meals:
         st.info("還沒有餐點，請老闆到「設定」新增。")
-    st.markdown("**點一下餐點加入**")
-    for i in range(0, len(meals), 3):
-        row = st.columns(3)
-        for col, it in zip(row, meals[i:i + 3]):
-            tag = " 🍱" if combos[it["id"]] else (" 🍹" if it["station"] == "bar" else "")
-            if col.button(f"{it['name']}{tag}  \n${it['price']}", key=f"om_{ckey}_{it['id']}", use_container_width=True):
-                cart.append({"uid": uuid4().hex[:8], "item_id": it["id"]})
+    st.markdown("**按一下就點**　<span class='pad-legend'><i class='lk'></i>廚房 <i class='lb'></i>吧台 "
+                "<i class='lc'></i>套餐</span>", unsafe_allow_html=True)
+    in_cart = {}
+    for e in cart:
+        _sync_entry(e)
+        in_cart[e["item_id"]] = in_cart.get(e["item_id"], 0) + e.get("qty", 1)
+    for i in range(0, len(meals), 4):
+        row = st.columns(4)
+        for col, it in zip(row, meals[i:i + 4]):
+            kind = "c" if combos[it["id"]] else ("b" if it["station"] == "bar" else "k")
+            badge = f"×{in_cart[it['id']]}  \n" if it["id"] in in_cart else ""
+            if col.button(f"{badge}{it['name']}  \n＄{it['price']}", key=f"pad{kind}_{ckey}_{it['id']}",
+                          use_container_width=True):
+                uid = uuid4().hex[:8]
+                cart.append({"uid": uid, "item_id": it["id"], "qty": 1})
+                st.session_state["pad_edit"] = [ckey, uid]
                 st.rerun()
+
+    edit = st.session_state.get("pad_edit")
+    if edit and edit[0] == ckey:
+        st.session_state.pop("pad_edit", None)
+        item_dialog(ckey, edit[1], seat_count if otype == "dine_in" else None, seat_names, seat_avoid)
 
     names = {i["id"]: i for i in meals}
     total = 0
+    if cart:
+        st.markdown("**本次點的**")
     for e in list(cart):
         it = names.get(e["item_id"])
         if not it:
             cart.remove(e)
             continue
-        with st.container(border=True):
-            inside = f"　<small>套餐：{'＋'.join(c['name'] for c in combos[it['id']])}</small>" if combos[it["id"]] else ""
-            st.markdown(f"**{it['name']}**　${it['price']}{inside}", unsafe_allow_html=True)
-            e["qty"] = stepper(f"oq{e['uid']}", 1, 99, 1)
-            if seat_count and otype == "dine_in":
-                labels = {0: "共用"}
-                labels.update({n: f"座{n}" + (f" {seat_names[n]}" if seat_names.get(n) else "")
-                               for n in range(1, seat_count + 1)})
-                st.caption("誰點的？")
-                e["seat"] = choice_buttons(f"os{e['uid']}", list(labels), labels, cols=min(5, len(labels))) or None
-            e["quick"] = quick_pick("特殊需求", QUICK_NOTES, f"on{e['uid']}")
-            e["text"] = st.text_input("其他需求", key=f"ot_{e['uid']}", placeholder="例：醬分開、飯少一點")
-            if st.button("🗑 移除這道", key=f"od{e['uid']}", use_container_width=True):
-                cart.remove(e)
-                st.rerun()
-            total += it["price"] * e["qty"]
+        _sync_entry(e)
+        qty = e.get("qty", 1)
+        seat = f"座{e['seat']}・" if e.get("seat") else ""
+        note = _entry_note(e)
+        gift = "　🎁招待" if e.get("gift") else ""
+        price = 0 if e.get("gift") else it["price"] * qty
+        c1, c2, c3 = st.columns([5, 1, 1])
+        c1.markdown(f"{seat}**{qty}× {it['name']}**　＄{price}{gift}" + (f"  \n:red[{note}]" if note else ""))
+        if c2.button("✏️", key=f"ed{e['uid']}", use_container_width=True, help="修改不吃／備註／份數"):
+            st.session_state["pad_edit"] = [ckey, e["uid"]]
+            st.rerun()
+        if c3.button("🗑", key=f"od{e['uid']}", use_container_width=True, help="移除"):
+            cart.remove(e)
+            st.rerun()
+        total += price
     if not cart:
-        st.caption("尚未選擇餐點")
+        st.caption("尚未點餐")
         return
     note_key = f"o_note_{ckey}"
     order_note = st.text_input("整單備註（過敏、趕時間…）", key=note_key)
-    st.markdown(f"### 本次合計　${total}")
+    st.markdown(f"### 本次合計　＄{total}")
     if st.button("📨 送出", type="primary", use_container_width=True, disabled=not accepting, key=f"send_{ckey}"):
-        lines = [{"item_id": e["item_id"], "qty": e["qty"], "seat": e.get("seat"),
-                  "note": "、".join(e.get("quick", []) + ([e["text"].strip()] if e.get("text", "").strip() else []))}
-                 for e in cart]
+        lines = [{"item_id": e["item_id"], "qty": e.get("qty", 1), "seat": e.get("seat"), "gift": e.get("gift", False),
+                  "note": _entry_note(e)} for e in cart]
         try:
             r = orders.place_order(conn, otype, lines, table, order_note, user["id"],
                                    guests=st.session_state.get(gkey) if guests_seats else None,
@@ -769,9 +893,9 @@ def order_form(user, otype, table, guests_seats=None, after="floor", on_placed=N
             return
         where = f"桌 {r['table_no']}" if otype == "dine_in" else f"外帶取餐號 #{r['pickup_no']}"
         for e in cart:
-            for k in (f"oq{e['uid']}", f"on{e['uid']}", f"ot_{e['uid']}", f"os{e['uid']}"):
+            for k in (f"oq{e['uid']}", f"on{e['uid']}", f"oa{e['uid']}", f"ot_{e['uid']}", f"os{e['uid']}", f"og{e['uid']}"):
                 st.session_state.pop(k, None)
-        for k in [k for k in st.session_state if str(k).startswith(f"nseat_") and str(k).split("_")[2] == str(table)]:
+        for k in [k for k in st.session_state if str(k).startswith("nseat_") and str(k).split("_")[2] == str(table)]:
             st.session_state.pop(k, None)
         for k in (note_key, gkey, ckey):
             st.session_state.pop(k, None)
@@ -795,8 +919,9 @@ def order_page():
     user = st.session_state.user
     top_bar()
     st.header("🍽️ 點餐")
+    msg_box = st.container()
     if msg := st.session_state.pop("last_order", None):
-        st.success(msg)
+        msg_box.success(msg)
     kitchen_banner(conn)
     otype = choice_buttons("order_type", ["dine_in", "takeout"], {"dine_in": "🍽️ 內用", "takeout": "🥡 外帶"})
     if otype == "takeout":
@@ -825,7 +950,8 @@ def order_page():
     if table and info:
         order_form(user, "dine_in", table, guests_seats=info["seats"] if info["stage"] == "empty" else None,
                    after="floor", seat_count=info["seats"],
-                   seat_names={x["seat_no"]: x["guest_name"] for x in info.get("seats_info", [])})
+                   seat_names={x["seat_no"]: x["guest_name"] for x in info.get("seats_info", [])},
+                   seat_avoid={x["seat_no"]: x["avoid"] for x in info.get("seats_info", []) if x["avoid"]})
 
 
 # ───────────────────────── 廚房／吧台：接單、備料總表、呼叫外場、看板 ─────────────────────────
@@ -1001,13 +1127,14 @@ def _station_board(station):
 def _station_page(station, title):
     top_bar()
     st.header(title)
+    msg_box = st.container()
+    if msg := st.session_state.pop("last_order", None):
+        msg_box.success(msg)
+    _station_board(station)
+    test_bell_button(f"bell_{station}")
     alert = st.session_state.pop(f"{station}_alert", None)
     if alert is not None:
         station_alert_dialog(station, alert)
-    if msg := st.session_state.pop("last_order", None):
-        st.success(msg)
-    _station_board(station)
-    test_bell_button(f"bell_{station}")
 
 
 def kitchen_page():

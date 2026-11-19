@@ -48,13 +48,16 @@ def queue_label(no):
     return f"#{no:03d}" if no else "#—"
 
 
-def _insert_line(conn, order_id, round_no, item, qty, note, seat_no=None):
-    """寫入一個品項。套餐會展開：套餐本身一行（計價），底下每個品項各一行（價格 0，送到各自的廚房／吧台）。"""
+def _insert_line(conn, order_id, round_no, item, qty, note, seat_no=None, gift=False):
+    """寫入一個品項。套餐會展開：套餐本身一行（計價），底下每個品項各一行（價格 0，送到各自的廚房／吧台）。
+    gift=True：招待（價格 0，標記為贈品）。"""
+    price = 0 if gift else item["price"]
     comps = combo_components(conn, item["id"])
     if comps:
         cur = conn.execute(
-            "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note,seat_no,station,is_combo)"
-            " VALUES (?,?,?,?,?,?,?,?,1)", (order_id, round_no, item["id"], qty, item["price"], note, seat_no, "combo"))
+            "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note,seat_no,station,is_combo,gift)"
+            " VALUES (?,?,?,?,?,?,?,?,1,?)",
+            (order_id, round_no, item["id"], qty, price, note, seat_no, "combo", 1 if gift else 0))
         pid = cur.lastrowid
         for comp in comps:
             conn.execute(
@@ -63,9 +66,9 @@ def _insert_line(conn, order_id, round_no, item, qty, note, seat_no=None):
                 (order_id, round_no, comp["id"], qty * comp["qty"], note, seat_no, comp["station"], pid))
     else:
         conn.execute(
-            "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note,seat_no,station)"
-            " VALUES (?,?,?,?,?,?,?,?)",
-            (order_id, round_no, item["id"], qty, item["price"], note, seat_no, item["station"]))
+            "INSERT INTO order_line(order_id,round_no,item_id,qty,unit_price,note,seat_no,station,gift)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (order_id, round_no, item["id"], qty, price, note, seat_no, item["station"], 1 if gift else 0))
 
 
 def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None, today=None,
@@ -110,7 +113,7 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
             seat = int(seat)
             if not 1 <= seat <= 30:
                 raise OpsError("座位號碼錯誤")
-        clean.append((it, qty, (ln.get("note") or "").strip() or None, seat))
+        clean.append((it, qty, (ln.get("note") or "").strip() or None, seat, bool(ln.get("gift"))))
 
     with conn:
         order = None
@@ -142,8 +145,8 @@ def place_order(conn, order_type, lines, table_no=None, note=None, user_id=None,
                 conn.execute("UPDATE meal_order SET note=? WHERE id=?", (merged, order_id))
             if guests and not order["guests"]:
                 conn.execute("UPDATE meal_order SET guests=? WHERE id=?", (guests, order_id))
-        for it, qty, lnote, seat in clean:
-            _insert_line(conn, order_id, round_no, it, qty, lnote, seat)
+        for it, qty, lnote, seat, gift in clean:
+            _insert_line(conn, order_id, round_no, it, qty, lnote, seat, gift)
         for seat_no, info in (seats or {}).items():
             _save_seat(conn, order_id, int(seat_no), info.get("guest_name"), info.get("customer_id"), info.get("avoid"))
     return {"order_id": order_id, "round_no": round_no, "table_no": table_no,
@@ -321,7 +324,7 @@ def close_order(conn, order_id):
             raise OpsError("這張訂單已經完成或取消")
         od = next(x for x in open_orders(conn) if x["id"] == order_id)
         if od["unpaid_total"] > 0:
-            raise OpsError(f"還有 ${od['unpaid_total']} 未結帳")
+            raise OpsError(f"還有 ＄{od['unpaid_total']} 未結帳")
         if od["unfinished"] or od["to_serve"]:
             raise OpsError(f"還有 {od['unfinished'] + od['to_serve']} 道餐點還沒上完")
         status = "paid" if od["total"] > 0 else "cancelled"
@@ -329,12 +332,15 @@ def close_order(conn, order_id):
                      (status, order_id))
 
 
-def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=None):
+def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=None, discount=0, note=None):
     """結帳指定品項（分開結帳）。selections = [(line_id, 份數), ...]。
+    discount：這次結帳折抵的金額（0～小計）；note：優惠備註。實收＝小計－折扣。
 
-    同一交易內：寫 sale / sale_line / 收入分錄、累加各品項已付份數；
-    全部結清後訂單才標記為已結帳。回傳 sale_id。
+    同一交易內：寫 sale / sale_line / 收入分錄、累加各品項已付份數。
+    結清不會結束訂單；客人離開時再按完成 (close_order)。回傳 sale_id。
     """
+    discount = int(discount or 0)
+    note = (note or "").strip() or None
     today = (today or date.today()).isoformat()
     picks = {}
     for line_id, qty in selections:
@@ -360,8 +366,10 @@ def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=N
                 raise OpsError("結帳份數超過未結帳份數")
             total += qty * l["unit_price"]
             rows.append((l, qty))
-        cur = conn.execute("INSERT INTO sale(total,pay_method,created_by) VALUES (?,?,?)",
-                           (total, pay_method, user_id))
+        if discount < 0 or discount > total:
+            raise OpsError(f"折扣需在 ＄0～＄{total} 之間")
+        cur = conn.execute("INSERT INTO sale(total,pay_method,created_by,discount,note) VALUES (?,?,?,?,?)",
+                           (total - discount, pay_method, user_id, discount, note))
         sale_id = cur.lastrowid
         for l, qty in rows:
             conn.execute(
@@ -377,24 +385,26 @@ def checkout_lines(conn, order_id, selections, pay_method, user_id=None, today=N
             "SELECT COUNT(*) FROM order_payment_line WHERE order_id=? AND sale_id!=?",
             (order_id, sale_id)).fetchone()[0]
         split = "（分開結帳）" if (left > 0 or earlier) else ""
+        promo = (f"，折扣 ${discount}" if discount else "") + (f"，{note}" if note else "")
         conn.execute(
             "INSERT INTO ledger(date,kind,amount,source,ref_type,ref_id,note,created_by)"
             " VALUES (?,?,?,?,?,?,?,?)",
-            (today, "income", total, "pos", "sale", sale_id,
-             f"餐點結帳 {_where(order)}（訂單 #{order_id}）{split}", user_id))
+            (today, "income", total - discount, "pos", "sale", sale_id,
+             f"餐點結帳 {_where(order)}（訂單 #{order_id}）{split}{promo}", user_id))
         # 結清不代表完成：訂單留在外場，等餐點上完、客人離開時按「完成」(close_order)
         conn.execute("UPDATE meal_order SET sale_id=? WHERE id=?", (sale_id, order_id))
     return sale_id
 
 
-def checkout_order(conn, order_id, pay_method, user_id=None, today=None):
-    """結清這張訂單所有尚未結帳的品項。"""
+def checkout_order(conn, order_id, pay_method, user_id=None, today=None, discount=0, note=None):
+    """結清這張訂單所有尚未結帳的品項（可加折扣與優惠備註）。"""
     rows = conn.execute(
         "SELECT id, qty-paid_qty AS rest FROM order_line "
         "WHERE order_id=? AND parent_id IS NULL AND status!='cancelled' AND qty>paid_qty", (order_id,)).fetchall()
     if not rows:
         raise OpsError("沒有可結帳的品項")
-    return checkout_lines(conn, order_id, [(r["id"], r["rest"]) for r in rows], pay_method, user_id, today)
+    return checkout_lines(conn, order_id, [(r["id"], r["rest"]) for r in rows], pay_method, user_id, today,
+                          discount, note)
 
 
 def split_evenly(amount, people):
@@ -887,3 +897,38 @@ def order_seats(conn, order_id):
     return [dict(r) for r in conn.execute(
         "SELECT se.*, c.name AS customer_name FROM order_seat se LEFT JOIN customer c ON c.id=se.customer_id "
         "WHERE se.order_id=? ORDER BY se.seat_no", (order_id,))]
+
+
+# ───────────────────────── 招待（贈品）、折扣試算 ─────────────────────────
+DISCOUNT_PRESETS = [("none", "不打折", 1.0), ("p95", "95 折", 0.95), ("p9", "9 折", 0.9),
+                    ("p85", "85 折", 0.85), ("p8", "8 折", 0.8), ("amount", "折抵金額", None)]
+
+
+def discount_amount(subtotal, preset, amount=0):
+    """折扣金額：依預設折數（四捨五入到元）或直接輸入的金額，不會超過小計。"""
+    rate = dict((k, r) for k, _, r in DISCOUNT_PRESETS).get(preset)
+    if preset == "amount":
+        d = int(amount or 0)
+    elif rate is None:
+        raise OpsError("折扣方式錯誤")
+    else:
+        d = subtotal - int(round(subtotal * rate))
+    return max(0, min(subtotal, d))
+
+
+def set_gift(conn, line_id, reason=None):
+    """把一個品項改成招待（贈品，不收錢）。已結帳的不能改；套餐整份招待。"""
+    with conn:
+        row = conn.execute(
+            "SELECT l.*, o.status AS ostatus FROM order_line l JOIN meal_order o ON o.id=l.order_id WHERE l.id=?",
+            (line_id,)).fetchone()
+        if not row or row["ostatus"] != "open" or row["status"] == "cancelled":
+            raise OpsError("找不到可以招待的品項")
+        if row["parent_id"]:
+            raise OpsError("套餐裡的品項請招待整份套餐")
+        if row["paid_qty"]:
+            raise OpsError("這個品項已結帳，不能改成招待")
+        reason = (reason or "").strip()
+        tag = "招待" + (f"：{reason}" if reason else "")
+        note = f"{row['note']}；{tag}" if row["note"] else tag
+        conn.execute("UPDATE order_line SET unit_price=0, gift=1, note=? WHERE id=?", (note, line_id))

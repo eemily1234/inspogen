@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS sale (
     pay_method TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'done' CHECK (status IN ('done','void')),
     invoice_no TEXT,             -- 預留：電子發票
+    discount INTEGER NOT NULL DEFAULT 0,   -- 這次結帳的折扣金額（total 是折扣後實收）
+    note TEXT,                   -- 優惠備註（例：生日 9 折、熟客招待）
     created_by INTEGER REFERENCES user(id),
     created_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
@@ -132,6 +134,7 @@ CREATE TABLE IF NOT EXISTS order_line (
     parent_id INTEGER,                      -- 套餐內的品項：指向套餐那一行
     station TEXT NOT NULL DEFAULT 'kitchen',   -- 由誰製作：kitchen 廚房 / bar 吧台 / combo 套餐本身（不用製作）
     is_combo INTEGER NOT NULL DEFAULT 0,    -- 1＝套餐（計價用；實際製作的是它底下的品項）
+    gift INTEGER NOT NULL DEFAULT 0,        -- 1＝招待／贈品（不收錢）
     origin TEXT,                            -- 併桌來源，例：併自 B1
     status TEXT NOT NULL DEFAULT 'new'
         CHECK (status IN ('new','preparing','ready','served','cancelled')),
@@ -261,6 +264,9 @@ MIGRATIONS = [
     ("order_line", "station", "TEXT NOT NULL DEFAULT 'kitchen'"),
     ("order_line", "is_combo", "INTEGER NOT NULL DEFAULT 0"),
     ("meal_order", "queue_no", "INTEGER"),
+    ("sale", "discount", "INTEGER NOT NULL DEFAULT 0"),
+    ("sale", "note", "TEXT"),
+    ("order_line", "gift", "INTEGER NOT NULL DEFAULT 0"),
     ("meal_order", "closed_at", "TEXT"),
     ("order_line", "paid_qty", "INTEGER NOT NULL DEFAULT 0"),
     ("order_line", "origin", "TEXT"),

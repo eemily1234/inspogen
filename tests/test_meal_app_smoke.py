@@ -152,7 +152,7 @@ def test_selecting_a_table_opens_ordering_on_the_same_page(seeded):
     assert not at.exception, [e.value for e in at.exception]
     assert at.session_state["sel"] == {"kind": "table", "key": "102"}
     assert any("桌 102" in m.value and "開桌點餐" in m.value for m in at.markdown)
-    [b for b in at.button if b.key == "om_ocart_102_1"][0].click().run()   # 點咖哩飯
+    [b for b in at.button if b.key == "padk_ocart_102_1"][0].click().run()   # 點咖哩飯
     [b for b in at.button if b.key == "send_ocart_102"][0].click().run()    # 送出
     assert not at.exception, [e.value for e in at.exception]
     od = next(x for x in o.open_orders(seeded) if x["table_no"] == "102")
@@ -189,7 +189,7 @@ def test_dashboard_handles_dishes_checkout_and_takeout_in_one_page(seeded):
     assert "sel" not in at.session_state
     # 外帶：在接單分頁開新外帶單
     [b for b in at.button if b.key == "new_takeout"][0].click().run()
-    [b for b in at.button if b.key == "om_ocart_takeout_2"][0].click().run()
+    [b for b in at.button if b.key == "padk_ocart_takeout_2"][0].click().run()
     [b for b in at.button if b.key == "send_ocart_takeout"][0].click().run()
     assert not at.exception, [e.value for e in at.exception]
     assert at.session_state["sel"]["kind"] == "order"                         # 送出後直接切到這張外帶單
@@ -201,7 +201,7 @@ def test_seats_and_who_ordered_what_reach_the_kitchen_screen(seeded):
     [b for b in at.button if b.key == "pick_102"][0].click().run()          # 空桌開桌
     at.selectbox(key="nseat_c_102_1").set_value(cid).run()                   # 座 1 是熟客
     at.text_input(key="nseat_n_102_2").set_value("陳先生").run()
-    [b for b in at.button if b.key == "om_ocart_102_1"][0].click().run()   # 咖哩飯
+    [b for b in at.button if b.key == "padk_ocart_102_1"][0].click().run()   # 咖哩飯
     uid = at.session_state["ocart_102"][0]["uid"]
     [b for b in at.button if b.key == f"os{uid}__1"][0].click().run()        # 這道是座 1 點的
     [b for b in at.button if b.key == "send_ocart_102"][0].click().run()
