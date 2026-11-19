@@ -2,7 +2,8 @@
 import os
 import sqlite3
 
-DB_PATH = os.environ.get("OPS_DB", "ops.db")
+# 預設固定放在專案資料夾（inspogen/ops.db），不管從哪個資料夾啟動都用同一個，避免資料「不見」
+DB_PATH = os.environ.get("OPS_DB", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ops.db"))
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user (
